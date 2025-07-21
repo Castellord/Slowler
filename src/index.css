@@ -228,3 +228,102 @@ code {
   border-radius: 4px;
   margin-top: 10px;
 }
+
+.info-message {
+  background: #d1ecf1;
+  color: #0c5460;
+  padding: 10px;
+  border-radius: 4px;
+  margin-top: 10px;
+}
+
+.backend-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 15px;
+  margin-top: 15px;
+  padding: 10px;
+  background: #f8f9fa;
+  border-radius: 6px;
+}
+
+.status-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+}
+
+.status-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.status-indicator.connected .status-dot {
+  background: #28a745;
+  animation: pulse 2s infinite;
+}
+
+.status-indicator.error .status-dot {
+  background: #dc3545;
+}
+
+.status-indicator.checking .status-dot {
+  background: #ffc107;
+  animation: blink 1s infinite;
+}
+
+@keyframes pulse {
+  0% { opacity: 1; }
+  50% { opacity: 0.5; }
+  100% { opacity: 1; }
+}
+
+@keyframes blink {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0.3; }
+}
+
+.test-connection-btn {
+  background: #17a2b8;
+  color: white;
+  border: none;
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.test-connection-btn:hover {
+  background: #138496;
+}
+
+.backend-instructions {
+  background: #fff3cd;
+  border: 1px solid #ffeaa7;
+  border-radius: 8px;
+  padding: 20px;
+  margin-top: 20px;
+}
+
+.backend-instructions h3 {
+  margin-top: 0;
+  color: #856404;
+}
+
+.code-block {
+  background: #f8f9fa;
+  border: 1px solid #dee2e6;
+  border-radius: 4px;
+  padding: 15px;
+  margin: 15px 0;
+  font-family: 'Courier New', monospace;
+}
+
+.code-block code {
+  color: #495057;
+  line-height: 1.6;
+}
