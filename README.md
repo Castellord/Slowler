@@ -72,7 +72,7 @@ pip install -r requirements.txt
 cd backend
 python app.py
 ```
-Сервер будет доступен на http://localhost:5000
+Сервер будет доступен на http://localhost:5230
 
 #### Запуск React приложения
 ```bash
@@ -162,7 +162,7 @@ Slowler/
 
 ### Сервер недоступен
 1. Убедитесь, что Python сервер запущен
-2. Проверьте порт 5000
+2. Проверьте порт 5230
 3. Установите все зависимости: `pip install -r backend/requirements.txt`
 
 ### Ошибки обработки

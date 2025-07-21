@@ -887,6 +887,6 @@ if __name__ == '__main__':
     print("   1. Rubber Band (лучший для сохранения качества)")
     print("   2. Librosa Phase Vocoder (fallback)")
     print("   3. Простая интерполяция (последний fallback)")
-    print("🌐 Сервер доступен на http://localhost:5000")
+    print("🌐 Сервер доступен на http://localhost:5230")
     
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=True, host='0.0.0.0', port=5230)
