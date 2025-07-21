@@ -18,7 +18,7 @@ function App() {
 
   const checkBackendHealth = async () => {
     try {
-      const response = await fetch('http://localhost:5000/health');
+      const response = await fetch('http://localhost:5230/health');
       if (response.ok) {
         setBackendStatus('connected');
         setMessage('✅ Подключение к серверу обработки установлено');
@@ -120,7 +120,7 @@ function App() {
       setProgress(50);
 
       // Отправляем запрос на сервер
-      const response = await fetch('http://localhost:5000/process', {
+      const response = await fetch('http://localhost:5230/process', {
         method: 'POST',
         body: formData,
       });
@@ -160,7 +160,7 @@ function App() {
       setTimeout(() => {
         setMessage('');
         setProgress(0);
-      }, 5000);
+      }, 5230);
     }
   };
 
@@ -317,7 +317,7 @@ function App() {
               python app.py
             </code>
           </div>
-          <p>После запуска сервер будет доступен на http://localhost:5000</p>
+          <p>После запуска сервер будет доступен на http://localhost:5230</p>
         </div>
       )}
     </div>
