@@ -18,7 +18,7 @@ function App() {
 
   const checkBackendHealth = async () => {
     try {
-      const response = await fetch('http://localhost:5230/health');
+      const response = await fetch('/health');
       if (response.ok) {
         setBackendStatus('connected');
         setMessage('✅ Подключение к серверу обработки установлено');
@@ -120,7 +120,7 @@ function App() {
       setProgress(50);
 
       // Отправляем запрос на сервер
-      const response = await fetch('http://localhost:5230/process', {
+      const response = await fetch('/process', {
         method: 'POST',
         body: formData,
       });
