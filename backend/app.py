@@ -31,7 +31,7 @@ app = Flask(__name__)
 CORS(app)
 
 # Конфигурация
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max file size
+app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max file size
 UPLOAD_FOLDER = tempfile.mkdtemp()
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
@@ -889,4 +889,13 @@ if __name__ == '__main__':
     print("   3. Простая интерполяция (последний fallback)")
     print("🌐 Сервер доступен на http://localhost:5230")
     
-    app.run(debug=True, host='0.0.0.0', port=5230)
+    # Используем Gunicorn для production или Flask dev server для разработки
+    import os
+    if os.environ.get('FLASK_ENV') == 'production':
+        # В production используем gunicorn через команду в Dockerfile
+        app.run(debug=False, host='0.0.0.0', port=5230)
+    else:
+        # В разработке увеличиваем лимиты для Werkzeug
+        from werkzeug.serving import WSGIRequestHandler
+        WSGIRequestHandler.protocol_version = "HTTP/1.1"
+        app.run(debug=True, host='0.0.0.0', port=5230, threaded=True)

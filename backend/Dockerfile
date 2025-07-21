@@ -10,4 +10,4 @@ RUN apt-get update && \
     pip install --upgrade pip && \
     pip install -r requirements.txt
 
-CMD ["python", "app.py"]
+CMD ["gunicorn", "--config", "gunicorn.conf.py", "app:app"]

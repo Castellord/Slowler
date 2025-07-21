@@ -126,8 +126,11 @@ function App() {
       });
 
       if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || 'Ошибка сервера');
+        if (response.status === 413) {
+          throw new Error('Файлы слишком большие. Попробуйте загрузить файлы меньшего размера или по одному.');
+        }
+        const errorData = await response.json().catch(() => ({ error: 'Ошибка сервера' }));
+        throw new Error(errorData.error || `Ошибка сервера (${response.status})`);
       }
 
       setMessage('📦 Получение обработанных файлов...');

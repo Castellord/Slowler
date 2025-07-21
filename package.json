@@ -10,10 +10,10 @@
     "file-saver": "^2.0.5",
     "web-vitals": "^2.1.4"
   },
-  "proxy": "http://backend:5230",
+  "proxy": "http://localhost:5230",
 
   "scripts": {
-    "start": "HOST=0.0.0.0 DANGEROUSLY_DISABLE_HOST_CHECK=true react-scripts start",
+    "start": "react-scripts start",
     "build": "react-scripts build",
     "test": "react-scripts test",
     "eject": "react-scripts eject"
