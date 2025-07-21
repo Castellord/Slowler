@@ -2,7 +2,8 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-COPY . .  # Копируем всё из backend/
+# Копируем всё из backend/
+COPY . .  
 
 RUN apt-get update && \
     apt-get install -y ffmpeg libsndfile1 && \
