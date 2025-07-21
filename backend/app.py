@@ -1,8 +1,11 @@
 import os
 import tempfile
 import zipfile
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, Response
 from flask_cors import CORS
+import json
+import threading
+import queue
 import librosa
 import numpy as np
 from scipy import signal
@@ -34,6 +37,35 @@ CORS(app)
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max file size
 UPLOAD_FOLDER = tempfile.mkdtemp()
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+
+# Глобальное хранилище прогресса
+progress_storage = {}
+
+def send_progress(session_id, file_index, total_files, step, message, progress_type='info'):
+    """Сохраняет прогресс для конкретной сессии"""
+    print(f"🔄 Сохраняем прогресс для сессии {session_id}: {message}")
+    
+    progress_data = {
+        'file_index': file_index,
+        'total_files': total_files,
+        'step': step,
+        'message': message,
+        'type': progress_type,
+        'timestamp': threading.current_thread().ident,
+        'time': str(threading.current_thread().ident)
+    }
+    
+    # Сохраняем в глобальное хранилище
+    if session_id not in progress_storage:
+        progress_storage[session_id] = []
+    
+    progress_storage[session_id].append(progress_data)
+    
+    # Ограничиваем размер лога (последние 50 записей)
+    if len(progress_storage[session_id]) > 50:
+        progress_storage[session_id] = progress_storage[session_id][-50:]
+    
+    print(f"✅ Прогресс сохранен для {session_id}: {len(progress_storage[session_id])} записей")
 
 def process_audio_with_rubberband(audio_path, speed_factor, preserve_pitch=True):
     """
@@ -731,6 +763,165 @@ def normalize_audio(audio):
     
     return audio
 
+def save_audio_in_format(output_path, processed_audio, sr, output_format='wav'):
+    """
+    Сохранение аудио в указанном формате (WAV или MP3)
+    """
+    try:
+        if output_format.lower() == 'mp3':
+            # Сохраняем в MP3
+            return save_as_mp3(output_path, processed_audio, sr)
+        else:
+            # Сохраняем в WAV (по умолчанию)
+            return save_as_wav(output_path, processed_audio, sr)
+    except Exception as e:
+        print(f"❌ Ошибка сохранения в формате {output_format}: {e}")
+        raise
+
+def save_as_wav(output_path, processed_audio, sr):
+    """
+    Сохранение аудио в формате WAV
+    """
+    try:
+        if HAS_SOUNDFILE:
+            # Используем soundfile если доступен
+            try:
+                if processed_audio.ndim == 2:
+                    # soundfile ожидает (samples, channels)
+                    audio_for_sf = processed_audio.T
+                else:
+                    audio_for_sf = processed_audio
+                
+                sf.write(output_path, audio_for_sf, sr, format='WAV', subtype='PCM_16')
+                print(f"✅ WAV файл сохранен через soundfile: {output_path}")
+                return output_path
+            except Exception as e:
+                print(f"⚠️ Ошибка soundfile: {e}, используем scipy")
+                return save_with_scipy(output_path, processed_audio, sr)
+        else:
+            return save_with_scipy(output_path, processed_audio, sr)
+    except Exception as e:
+        print(f"❌ Ошибка сохранения WAV: {e}")
+        raise
+
+def save_as_mp3(output_path, processed_audio, sr):
+    """
+    Сохранение аудио в формате MP3
+    """
+    try:
+        # Сначала сохраняем во временный WAV файл
+        temp_wav_path = output_path.replace('.mp3', '_temp.wav')
+        save_as_wav(temp_wav_path, processed_audio, sr)
+        
+        # Конвертируем WAV в MP3
+        return convert_wav_to_mp3(temp_wav_path, output_path)
+        
+    except Exception as e:
+        print(f"❌ Ошибка сохранения MP3: {e}")
+        raise
+
+def convert_wav_to_mp3(wav_path, mp3_path):
+    """
+    Конвертация WAV в MP3 через pydub или ffmpeg
+    """
+    try:
+        # Пробуем использовать pydub
+        from pydub import AudioSegment
+        
+        print(f"🔄 Конвертируем WAV в MP3: {wav_path} -> {mp3_path}")
+        
+        # Загружаем WAV
+        audio = AudioSegment.from_wav(wav_path)
+        
+        # Экспортируем как MP3 с хорошим качеством
+        audio.export(
+            mp3_path,
+            format="mp3",
+            bitrate="320k",  # Высокое качество
+            parameters=["-q:a", "0"]  # Лучшее качество
+        )
+        
+        # Удаляем временный WAV файл
+        try:
+            os.unlink(wav_path)
+        except:
+            pass
+        
+        print(f"✅ MP3 файл создан: {mp3_path}")
+        return mp3_path
+        
+    except ImportError:
+        print("⚠️ pydub недоступен, используем ffmpeg")
+        return convert_wav_to_mp3_with_ffmpeg(wav_path, mp3_path)
+    except Exception as e:
+        print(f"⚠️ Ошибка конвертации через pydub: {e}")
+        return convert_wav_to_mp3_with_ffmpeg(wav_path, mp3_path)
+
+def convert_wav_to_mp3_with_ffmpeg(wav_path, mp3_path):
+    """
+    Конвертация WAV в MP3 через ffmpeg
+    """
+    try:
+        import subprocess
+        
+        # Конвертируем через ffmpeg с высоким качеством
+        cmd = [
+            'ffmpeg', '-i', wav_path,
+            '-codec:a', 'libmp3lame',
+            '-b:a', '320k',  # Высокий битрейт
+            '-q:a', '0',     # Лучшее качество
+            '-y', mp3_path
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode == 0:
+            # Удаляем временный WAV файл
+            try:
+                os.unlink(wav_path)
+            except:
+                pass
+            
+            print(f"✅ MP3 файл создан через ffmpeg: {mp3_path}")
+            return mp3_path
+        else:
+            print(f"⚠️ Ошибка ffmpeg: {result.stderr}")
+            raise Exception("Не удалось конвертировать в MP3")
+            
+    except Exception as e:
+        print(f"⚠️ Ошибка конвертации через ffmpeg: {e}")
+        raise
+
+@app.route('/progress/<session_id>', methods=['GET'])
+def get_progress(session_id):
+    """Получение прогресса обработки через polling"""
+    try:
+        if session_id in progress_storage:
+            # Возвращаем все записи прогресса для сессии
+            return jsonify({
+                'success': True,
+                'progress': progress_storage[session_id],
+                'count': len(progress_storage[session_id])
+            })
+        else:
+            return jsonify({
+                'success': True,
+                'progress': [],
+                'count': 0
+            })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/progress/<session_id>/clear', methods=['POST'])
+def clear_progress(session_id):
+    """Очистка прогресса для сессии"""
+    try:
+        if session_id in progress_storage:
+            del progress_storage[session_id]
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 @app.route('/health', methods=['GET'])
 def health_check():
     """Проверка работоспособности сервера"""
@@ -747,9 +938,21 @@ def process_audio():
         files = request.files.getlist('files')
         speeds = request.form.getlist('speeds')
         preserve_pitch = request.form.get('preserve_pitch', 'true').lower() == 'true'
+        output_format = request.form.get('output_format', 'wav').lower()
+        session_id = request.form.get('session_id', 'default')
         
         if len(files) != len(speeds):
             return jsonify({'error': 'Количество файлов и скоростей не совпадает'}), 400
+        
+        # Проверяем поддерживаемые форматы
+        if output_format not in ['wav', 'mp3']:
+            return jsonify({'error': f'Неподдерживаемый формат: {output_format}. Поддерживаются: wav, mp3'}), 400
+        
+        print(f"🎵 Начинаем обработку {len(files)} файлов в формате {output_format.upper()}")
+        print(f"⚙️ Настройки: preserve_pitch={preserve_pitch}")
+        
+        # Отправляем начальный прогресс
+        send_progress(session_id, 0, len(files), 0.0, f'Начинаем обработку {len(files)} файлов', 'info')
         
         # Создаем временную директорию для обработки
         temp_dir = tempfile.mkdtemp()
@@ -773,44 +976,45 @@ def process_audio():
                 
                 # Обрабатываем аудио
                 try:
+                    send_progress(session_id, i, len(files), 0.1, f'Загрузка {file.filename}', 'info')
+                    print(f"📁 Обрабатываем файл {i+1}/{len(files)}: {file.filename}")
+                    print(f"🎛️ Скорость: {speed}x, Формат: {output_format.upper()}")
+                    
+                    send_progress(session_id, i, len(files), 0.3, f'Обработка {file.filename}', 'info')
                     processed_audio, sr = process_audio_with_rubberband(
                         input_path, speed, preserve_pitch
                     )
                     
+                    send_progress(session_id, i, len(files), 0.6, f'Нормализация {file.filename}', 'info')
+                    print(f"🔧 Нормализация аудио...")
                     # Нормализуем
                     processed_audio = normalize_audio(processed_audio)
                     
-                    # Сохраняем результат
-                    output_filename = f"{os.path.splitext(file.filename)[0]}_slowed.wav"
+                    # Определяем имя и путь выходного файла в зависимости от формата
+                    base_name = os.path.splitext(file.filename)[0]
+                    output_filename = f"{base_name}_slowed.{output_format}"
                     output_path = os.path.join(temp_dir, output_filename)
                     
-                    # Сохраняем результат
-                    print(f"💾 Сохраняем результат: {processed_audio.shape}, sr={sr}")
+                    send_progress(session_id, i, len(files), 0.8, f'Сохранение в {output_format.upper()}', 'info')
+                    # Сохраняем результат в выбранном формате
+                    print(f"💾 Сохраняем результат в формате {output_format.upper()}: {processed_audio.shape}, sr={sr}")
                     
-                    if HAS_SOUNDFILE:
-                        # Используем soundfile если доступен
-                        try:
-                            if processed_audio.ndim == 2:
-                                # soundfile ожидает (samples, channels)
-                                audio_for_sf = processed_audio.T
-                            else:
-                                audio_for_sf = processed_audio
-                            
-                            sf.write(output_path, audio_for_sf, sr, format='WAV', subtype='PCM_16')
-                            print(f"✅ Файл сохранен через soundfile: {output_path}")
-                        except Exception as e:
-                            print(f"⚠️ Ошибка soundfile: {e}, используем scipy")
-                            save_with_scipy(output_path, processed_audio, sr)
-                    else:
-                        save_with_scipy(output_path, processed_audio, sr)
-                    processed_files.append((output_path, output_filename))
+                    final_path = save_audio_in_format(output_path, processed_audio, sr, output_format)
+                    processed_files.append((final_path, output_filename))
+                    
+                    send_progress(session_id, i, len(files), 1.0, f'Завершено: {file.filename}', 'success')
+                    print(f"✅ Файл {file.filename} обработан успешно")
                     
                 except Exception as e:
-                    print(f"Ошибка обработки файла {file.filename}: {e}")
+                    send_progress(session_id, i, len(files), 0.0, f'Ошибка: {file.filename}', 'error')
+                    print(f"❌ Ошибка обработки файла {file.filename}: {e}")
                     return jsonify({'error': f'Ошибка обработки файла {file.filename}: {str(e)}'}), 500
             
             if not processed_files:
                 return jsonify({'error': 'Нет файлов для обработки'}), 400
+            
+            # Отправляем прогресс создания архива
+            send_progress(session_id, len(files), len(files), 0.9, 'Создание ZIP архива', 'info')
             
             # Создаем ZIP архив
             zip_buffer = io.BytesIO()
@@ -819,6 +1023,9 @@ def process_audio():
                     zip_file.write(file_path, filename)
             
             zip_buffer.seek(0)
+            
+            # Отправляем сигнал о завершении
+            send_progress(session_id, len(files), len(files), 1.0, 'Обработка завершена!', 'complete')
             
             return send_file(
                 zip_buffer,
