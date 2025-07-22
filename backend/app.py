@@ -3,6 +3,7 @@ import tempfile
 import zipfile
 from flask import Flask, request, jsonify, send_file, Response
 from flask_cors import CORS
+from flask_socketio import SocketIO, emit, join_room, leave_room
 import json
 import threading
 import queue
@@ -33,6 +34,9 @@ except ImportError:
 app = Flask(__name__)
 CORS(app)
 
+# Инициализация SocketIO
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+
 # Конфигурация
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max file size
 UPLOAD_FOLDER = tempfile.mkdtemp()
@@ -42,8 +46,8 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 progress_storage = {}
 
 def send_progress(session_id, file_index, total_files, step, message, progress_type='info'):
-    """Сохраняет прогресс для конкретной сессии"""
-    print(f"🔄 Сохраняем прогресс для сессии {session_id}: {message}")
+    """Отправляет прогресс через WebSocket и сохраняет для fallback"""
+    print(f"🔄 Отправляем прогресс для сессии {session_id}: {message}")
     
     progress_data = {
         'file_index': file_index,
@@ -55,7 +59,16 @@ def send_progress(session_id, file_index, total_files, step, message, progress_t
         'time': str(threading.current_thread().ident)
     }
     
-    # Сохраняем в глобальное хранилище
+    # Отправляем через WebSocket
+    try:
+        socketio.emit('progress_update', progress_data, room=session_id)
+        # Принудительно отправляем сообщение
+        socketio.sleep(0)  # Позволяет eventlet обработать сообщение
+        print(f"📡 WebSocket сообщение отправлено для {session_id}")
+    except Exception as e:
+        print(f"⚠️ Ошибка отправки WebSocket: {e}")
+    
+    # Сохраняем в глобальное хранилище как fallback
     if session_id not in progress_storage:
         progress_storage[session_id] = []
     
@@ -67,15 +80,44 @@ def send_progress(session_id, file_index, total_files, step, message, progress_t
     
     print(f"✅ Прогресс сохранен для {session_id}: {len(progress_storage[session_id])} записей")
 
-def process_audio_with_rubberband(audio_path, speed_factor, preserve_pitch=True):
+def process_audio_with_rubberband(audio_path, speed_factor, preserve_pitch=True, output_format='wav'):
     """
     Обработка аудио с использованием лучших доступных алгоритмов
     """
     try:
+        # Проверяем, нужно ли изменять скорость
+        if abs(speed_factor - 1.0) < 0.001:  # Скорость практически равна 1.0
+            print(f"⚡ Скорость {speed_factor}x близка к 1.0, пропускаем обработку Rubber Band")
+            
+            # Проверяем входной и выходной форматы
+            input_ext = os.path.splitext(audio_path.lower())[1]
+            
+            if input_ext == '.mp3' and output_format.lower() == 'mp3':
+                print(f"📁 MP3→MP3 без изменения скорости: возвращаем исходный файл")
+                # Возвращаем специальный маркер для прямого копирования
+                return 'DIRECT_COPY', audio_path
+            else:
+                print(f"📁 Выполняем только конвертацию формата")
+                # Просто загружаем и возвращаем аудио без изменения скорости
+                wav_path = convert_to_wav_if_needed(audio_path)
+                y, sr = load_audio_with_scipy(wav_path)
+                
+                if y.ndim == 1:
+                    y = np.array([y, y])
+                
+                # Очищаем временный файл если он был создан
+                if wav_path != audio_path:
+                    try:
+                        os.unlink(wav_path)
+                    except:
+                        pass
+                
+                return y, sr
+        
         # Сначала конвертируем в WAV если нужно
         wav_path = convert_to_wav_if_needed(audio_path)
         
-        # Используем Rubber Band если доступен
+        # Используем Rubber Band если доступен и скорость отличается от 1.0
         if HAS_RUBBERBAND:
             try:
                 print(f"🎵 Используем Rubber Band с файлом: {wav_path}")
@@ -981,26 +1023,47 @@ def process_audio():
                     print(f"🎛️ Скорость: {speed}x, Формат: {output_format.upper()}")
                     
                     send_progress(session_id, i, len(files), 0.3, f'Обработка {file.filename}', 'info')
-                    processed_audio, sr = process_audio_with_rubberband(
-                        input_path, speed, preserve_pitch
+                    result = process_audio_with_rubberband(
+                        input_path, speed, preserve_pitch, output_format
                     )
                     
-                    send_progress(session_id, i, len(files), 0.6, f'Нормализация {file.filename}', 'info')
-                    print(f"🔧 Нормализация аудио...")
-                    # Нормализуем
-                    processed_audio = normalize_audio(processed_audio)
-                    
-                    # Определяем имя и путь выходного файла в зависимости от формата
-                    base_name = os.path.splitext(file.filename)[0]
-                    output_filename = f"{base_name}_slowed.{output_format}"
-                    output_path = os.path.join(temp_dir, output_filename)
-                    
-                    send_progress(session_id, i, len(files), 0.8, f'Сохранение в {output_format.upper()}', 'info')
-                    # Сохраняем результат в выбранном формате
-                    print(f"💾 Сохраняем результат в формате {output_format.upper()}: {processed_audio.shape}, sr={sr}")
-                    
-                    final_path = save_audio_in_format(output_path, processed_audio, sr, output_format)
-                    processed_files.append((final_path, output_filename))
+                    # Проверяем, нужно ли прямое копирование
+                    if isinstance(result, tuple) and len(result) == 2 and result[0] == 'DIRECT_COPY':
+                        # Прямое копирование MP3 файла
+                        source_path = result[1]
+                        base_name = os.path.splitext(file.filename)[0]
+                        output_filename = f"{base_name}_slowed.{output_format}"
+                        output_path = os.path.join(temp_dir, output_filename)
+                        
+                        send_progress(session_id, i, len(files), 0.8, f'Копирование {file.filename}', 'info')
+                        print(f"📋 Прямое копирование MP3 файла: {source_path} -> {output_path}")
+                        
+                        # Копируем файл
+                        import shutil
+                        shutil.copy2(source_path, output_path)
+                        
+                        processed_files.append((output_path, output_filename))
+                        print(f"✅ Файл {file.filename} скопирован без обработки")
+                    else:
+                        # Обычная обработка
+                        processed_audio, sr = result
+                        
+                        send_progress(session_id, i, len(files), 0.6, f'Нормализация {file.filename}', 'info')
+                        print(f"🔧 Нормализация аудио...")
+                        # Нормализуем
+                        processed_audio = normalize_audio(processed_audio)
+                        
+                        # Определяем имя и путь выходного файла в зависимости от формата
+                        base_name = os.path.splitext(file.filename)[0]
+                        output_filename = f"{base_name}_slowed.{output_format}"
+                        output_path = os.path.join(temp_dir, output_filename)
+                        
+                        send_progress(session_id, i, len(files), 0.8, f'Сохранение в {output_format.upper()}', 'info')
+                        # Сохраняем результат в выбранном формате
+                        print(f"💾 Сохраняем результат в формате {output_format.upper()}: {processed_audio.shape}, sr={sr}")
+                        
+                        final_path = save_audio_in_format(output_path, processed_audio, sr, output_format)
+                        processed_files.append((final_path, output_filename))
                     
                     send_progress(session_id, i, len(files), 1.0, f'Завершено: {file.filename}', 'success')
                     print(f"✅ Файл {file.filename} обработан успешно")
@@ -1088,21 +1151,50 @@ def test_processing():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+# WebSocket обработчики
+@socketio.on('connect')
+def handle_connect():
+    """Обработка подключения клиента"""
+    print(f"🔌 Клиент подключился: {request.sid}")
+    emit('connected', {'message': 'Подключение к серверу установлено'})
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    """Обработка отключения клиента"""
+    print(f"🔌 Клиент отключился: {request.sid}")
+
+@socketio.on('join_session')
+def handle_join_session(data):
+    """Присоединение к сессии для получения обновлений прогресса"""
+    session_id = data.get('session_id')
+    if session_id:
+        join_room(session_id)
+        print(f"👥 Клиент {request.sid} присоединился к сессии {session_id}")
+        emit('session_joined', {'session_id': session_id})
+
+@socketio.on('leave_session')
+def handle_leave_session(data):
+    """Покидание сессии"""
+    session_id = data.get('session_id')
+    if session_id:
+        leave_room(session_id)
+        print(f"👥 Клиент {request.sid} покинул сессию {session_id}")
+        emit('session_left', {'session_id': session_id})
+
 if __name__ == '__main__':
-    print("🎵 Запуск сервера обработки аудио...")
+    print("🎵 Запуск сервера обработки аудио с WebSocket поддержкой...")
     print("📚 Доступные алгоритмы:")
     print("   1. Rubber Band (лучший для сохранения качества)")
     print("   2. Librosa Phase Vocoder (fallback)")
     print("   3. Простая интерполяция (последний fallback)")
     print("🌐 Сервер доступен на http://localhost:5230")
+    print("📡 WebSocket доступен на ws://localhost:5230")
     
-    # Используем Gunicorn для production или Flask dev server для разработки
+    # Используем SocketIO для запуска сервера
     import os
     if os.environ.get('FLASK_ENV') == 'production':
-        # В production используем gunicorn через команду в Dockerfile
-        app.run(debug=False, host='0.0.0.0', port=5230)
+        # В production используем eventlet
+        socketio.run(app, debug=False, host='0.0.0.0', port=5230)
     else:
-        # В разработке увеличиваем лимиты для Werkzeug
-        from werkzeug.serving import WSGIRequestHandler
-        WSGIRequestHandler.protocol_version = "HTTP/1.1"
-        app.run(debug=True, host='0.0.0.0', port=5230, threaded=True)
+        # В разработке
+        socketio.run(app, debug=True, host='0.0.0.0', port=5230)

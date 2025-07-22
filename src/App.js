@@ -1,10 +1,12 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
+import io from 'socket.io-client';
 
 function App() {
   const [files, setFiles] = useState([]);
   const [globalSpeed, setGlobalSpeed] = useState(0.5);
   const [preservePitch, setPreservePitch] = useState(true);
   const [outputFormat, setOutputFormat] = useState('wav'); // 'wav' или 'mp3'
+  const [saveLog, setSaveLog] = useState(false); // Сохранение лога в файл
   const [processing, setProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
   const [message, setMessage] = useState('');
@@ -12,12 +14,69 @@ function App() {
   const [backendStatus, setBackendStatus] = useState('checking');
   const [processingLog, setProcessingLog] = useState([]);
   const [currentFile, setCurrentFile] = useState('');
+  const [socket, setSocket] = useState(null);
+  const [socketConnected, setSocketConnected] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
   const fileInputRef = useRef(null);
 
-  // Проверяем статус бекенда при загрузке
-  React.useEffect(() => {
+  // Проверяем статус бекенда при загрузке и инициализируем WebSocket
+  useEffect(() => {
     checkBackendHealth();
-  }, []);
+    initializeWebSocket();
+    
+    return () => {
+      if (socket) {
+        socket.disconnect();
+      }
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const initializeWebSocket = () => {
+    try {
+      const newSocket = io('http://localhost:5230', {
+        transports: ['websocket', 'polling'],
+        timeout: 5000,
+      });
+
+      newSocket.on('connect', () => {
+        console.log('🔌 WebSocket подключен');
+        setSocketConnected(true);
+        addToLog('📡 WebSocket подключение установлено', 'success');
+      });
+
+      newSocket.on('disconnect', () => {
+        console.log('🔌 WebSocket отключен');
+        setSocketConnected(false);
+        addToLog('📡 WebSocket подключение потеряно', 'error');
+      });
+
+      newSocket.on('progress_update', (data) => {
+        console.log('📡 Получен прогресс через WebSocket:', data);
+        
+        // Добавляем сообщение от backend в лог
+        addBackendLogEntry(data);
+        
+        // Обновляем прогресс на основе данных от сервера
+        if (data.file_index !== undefined && data.total_files !== undefined) {
+          updateProgress(data.file_index, data.total_files, data.step || 0, data.message);
+        }
+        
+        if (data.type === 'complete') {
+          addToLog('🎉 Обработка полностью завершена!', 'success');
+        }
+      });
+
+      newSocket.on('connect_error', (error) => {
+        console.error('❌ Ошибка WebSocket подключения:', error);
+        setSocketConnected(false);
+      });
+
+      setSocket(newSocket);
+    } catch (error) {
+      console.error('❌ Ошибка инициализации WebSocket:', error);
+      setSocketConnected(false);
+    }
+  };
 
   const checkBackendHealth = async () => {
     try {
@@ -37,8 +96,7 @@ function App() {
     }
   };
 
-  const handleFileSelect = (event) => {
-    const selectedFiles = Array.from(event.target.files);
+  const processSelectedFiles = (selectedFiles) => {
     const audioFiles = selectedFiles.filter(file => 
       file.type === 'audio/mp3' || file.type === 'audio/wav' || 
       file.type === 'audio/mpeg' || file.type === 'audio/x-wav'
@@ -50,16 +108,77 @@ function App() {
       setTimeout(() => setMessage(''), 3000);
     }
 
-    const newFiles = audioFiles.map((file, index) => ({
-      id: Date.now() + index,
-      file: file,
-      name: file.name,
-      size: file.size,
-      speed: globalSpeed
-    }));
+    if (audioFiles.length > 0) {
+      const newFiles = audioFiles.map((file, index) => ({
+        id: Date.now() + index,
+        file: file,
+        name: file.name,
+        size: file.size,
+        speed: globalSpeed
+      }));
 
-    setFiles(prev => [...prev, ...newFiles]);
+      setFiles(prev => [...prev, ...newFiles]);
+      
+      // Показываем сообщение об успешном добавлении
+      setMessage(`✅ Добавлено ${audioFiles.length} файл(ов)`);
+      setMessageType('success');
+      setTimeout(() => setMessage(''), 2000);
+    }
+  };
+
+  const handleFileSelect = (event) => {
+    const selectedFiles = Array.from(event.target.files);
+    processSelectedFiles(selectedFiles);
     event.target.value = '';
+  };
+
+  // Обработчики drag-and-drop
+  const handleDragEnter = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (backendStatus === 'connected') {
+      setDragActive(true);
+    }
+  };
+
+  const handleDragLeave = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    // Проверяем, что курсор действительно покинул область загрузки
+    // а не просто перешел на дочерний элемент
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX;
+    const y = e.clientY;
+    
+    if (x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom) {
+      setDragActive(false);
+    }
+  };
+
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    // Убеждаемся, что состояние активно при движении курсора
+    if (backendStatus === 'connected' && !dragActive) {
+      setDragActive(true);
+    }
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(false);
+
+    if (backendStatus !== 'connected') {
+      return;
+    }
+
+    const droppedFiles = Array.from(e.dataTransfer.files);
+    if (droppedFiles.length > 0) {
+      processSelectedFiles(droppedFiles);
+    }
   };
 
   const removeFile = (id) => {
@@ -114,12 +233,26 @@ function App() {
 
   const addBackendLogEntry = (entry) => {
     const timestamp = new Date().toLocaleTimeString();
-    setProcessingLog(prev => [...prev, { 
+    const newEntry = { 
       id: Date.now() + Math.random(), // Уникальный ID
       message: entry.message, 
       type: entry.type, 
       timestamp 
-    }]);
+    };
+
+    // Проверяем дублирование - не добавляем если такое же сообщение было в последние 2 секунды
+    setProcessingLog(prev => {
+      const now = Date.now();
+      const recentEntries = prev.filter(e => now - e.id < 2000); // Последние 2 секунды
+      const isDuplicate = recentEntries.some(e => e.message === entry.message);
+      
+      if (isDuplicate) {
+        console.log('🔄 Пропускаем дублированное сообщение:', entry.message);
+        return prev;
+      }
+      
+      return [...prev, newEntry];
+    });
   };
 
   const getProcessButtonText = () => {
@@ -194,74 +327,59 @@ function App() {
 
       setMessage('🔄 Обработка файлов на сервере...');
 
-      // Запускаем polling для получения прогресса
+      // Подключаемся к WebSocket сессии для получения прогресса
+      let progressInterval = null;
       let lastProgressCount = 0;
-      const pollProgress = async () => {
-        try {
-          const progressResponse = await fetch(`/progress/${sessionId}`);
-          if (progressResponse.ok) {
-            const progressData = await progressResponse.json();
-            
-            if (progressData.success && progressData.progress.length > lastProgressCount) {
-              // Обрабатываем новые записи прогресса
-              const newEntries = progressData.progress.slice(lastProgressCount);
+      
+      if (socket && socketConnected) {
+        socket.emit('join_session', { session_id: sessionId });
+        addToLog('📡 Подключились к WebSocket сессии', 'info');
+        addToLog('🚀 Используем WebSocket для real-time обновлений', 'info');
+      } else {
+        addToLog('⚠️ WebSocket недоступен, используем fallback polling', 'warning');
+        
+        // Запускаем polling только если WebSocket недоступен
+        const pollProgress = async () => {
+          try {
+            const progressResponse = await fetch(`/progress/${sessionId}`);
+            if (progressResponse.ok) {
+              const progressData = await progressResponse.json();
               
-              for (const entry of newEntries) {
-                console.log('Получен прогресс:', entry);
+              if (progressData.success && progressData.progress.length > lastProgressCount) {
+                // Обрабатываем новые записи прогресса
+                const newEntries = progressData.progress.slice(lastProgressCount);
                 
-                if (entry.type === 'complete') {
-                  addToLog('🎉 Обработка полностью завершена!', 'success');
-                  clearInterval(progressInterval);
-                  return;
+                for (const entry of newEntries) {
+                  console.log('📊 Получен прогресс через polling:', entry);
+                  
+                  // Добавляем сообщение от backend в лог
+                  addBackendLogEntry(entry);
+                  
+                  // Обновляем прогресс на основе данных от сервера
+                  if (entry.file_index !== undefined && entry.total_files !== undefined) {
+                    updateProgress(entry.file_index, entry.total_files, entry.step || 0, entry.message);
+                  }
+                  
+                  if (entry.type === 'complete') {
+                    addToLog('🎉 Обработка полностью завершена!', 'success');
+                    clearInterval(progressInterval);
+                    return;
+                  }
                 }
                 
-                // Добавляем сообщение от backend в лог
-                addBackendLogEntry(entry);
-                
-                // Обновляем прогресс на основе данных от сервера
-                updateProgress(entry.file_index, entry.total_files, entry.step, entry.message);
+                lastProgressCount = progressData.progress.length;
               }
-              
-              lastProgressCount = progressData.progress.length;
             }
+          } catch (error) {
+            console.error('Ошибка polling прогресса:', error);
           }
-        } catch (error) {
-          console.error('Ошибка polling прогресса:', error);
-        }
-      };
+        };
+
+        // Запускаем polling каждые 2 секунды только как fallback
+        progressInterval = setInterval(pollProgress, 2000);
+      }
 
       addToLog('📤 Отправляем запрос на обработку', 'info');
-
-      // Запускаем polling каждые 2 секунды (уменьшаем нагрузку)
-      const progressInterval = setInterval(async () => {
-        try {
-          const progressResponse = await fetch(`/progress/${sessionId}`);
-          if (progressResponse.ok) {
-            const progressData = await progressResponse.json();
-            
-            if (progressData.success && progressData.progress.length > lastProgressCount) {
-              // Обрабатываем новые записи прогресса
-              const newEntries = progressData.progress.slice(lastProgressCount);
-              
-              for (const entry of newEntries) {
-                console.log('Получен прогресс:', entry);
-                
-                // Добавляем сообщение от backend в лог
-                addBackendLogEntry(entry);
-                
-                // Обновляем прогресс на основе данных от сервера
-                if (entry.file_index !== undefined && entry.total_files !== undefined) {
-                  updateProgress(entry.file_index, entry.total_files, entry.step || 0, entry.message);
-                }
-              }
-              
-              lastProgressCount = progressData.progress.length;
-            }
-          }
-        } catch (error) {
-          console.error('Ошибка polling прогресса:', error);
-        }
-      }, 3000); // Каждые 2 секунды
 
       // Отправляем запрос на сервер
       const response = await fetch('/process', {
@@ -271,9 +389,6 @@ function App() {
       
       // Останавливаем polling после получения ответа
       clearInterval(progressInterval);
-      
-      // Получаем последние записи прогресса
-      await pollProgress();
 
       if (!response.ok) {
         if (response.status === 413) {
@@ -308,6 +423,13 @@ function App() {
       setMessageType('success');
       addToLog('🎉 Архив успешно загружен!', 'success');
 
+      // Автоматически скачиваем лог если включена настройка
+      if (saveLog) {
+        setTimeout(() => {
+          downloadLog();
+        }, 1000); // Небольшая задержка для завершения всех операций
+      }
+
     } catch (error) {
       console.error('Ошибка обработки:', error);
       setMessage(`❌ Ошибка обработки: ${error.message}`);
@@ -324,6 +446,49 @@ function App() {
     }
   };
 
+  const downloadLog = () => {
+    if (processingLog.length === 0) {
+      setMessage('Лог пуст, нечего скачивать');
+      setMessageType('error');
+      setTimeout(() => setMessage(''), 3000);
+      return;
+    }
+
+    // Создаем содержимое лога
+    const logContent = processingLog.map(entry => 
+      `[${entry.timestamp}] ${entry.message}`
+    ).join('\n');
+
+    // Добавляем заголовок с информацией о сессии
+    const timestamp = new Date().toLocaleString();
+    const header = `SETINA Slowdown App - Лог обработки
+Дата и время: ${timestamp}
+Количество файлов: ${files.length}
+Формат вывода: ${outputFormat.toUpperCase()}
+Сохранение тональности: ${preservePitch ? 'Да' : 'Нет'}
+WebSocket подключение: ${socketConnected ? 'Активно' : 'Неактивно'}
+
+=== ЛОГ ОБРАБОТКИ ===
+
+`;
+
+    const fullLogContent = header + logContent;
+
+    // Создаем и скачиваем файл
+    const blob = new Blob([fullLogContent], { type: 'text/plain;charset=utf-8' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.style.display = 'none';
+    a.href = url;
+    a.download = `slowdown_log_${Date.now()}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+
+    addToLog('📄 Лог сохранен в файл', 'success');
+  };
+
   const testConnection = async () => {
     setMessage('🔄 Проверка подключения к серверу...');
     setMessageType('info');
@@ -336,33 +501,55 @@ function App() {
         <h1>SETINA Slowdown App</h1>
         <p>Профессиональное замедление аудио с использованием Rubber Band алгоритма</p>
         
-        <div className="backend-status">
-          <div className={`status-indicator ${backendStatus}`}>
-            <span className="status-dot"></span>
-            {backendStatus === 'connected' && 'Сервер подключен'}
-            {backendStatus === 'error' && 'Сервер недоступен'}
-            {backendStatus === 'checking' && 'Проверка подключения...'}
+        <div className={`backend-status-circle ${backendStatus}`}>
+          <div className="status-dot"></div>
+          <div className="status-tooltip">
+            <div className="status-info">
+              <div className="status-text">
+                {backendStatus === 'connected' && '✅ Сервер подключен'}
+                {backendStatus === 'error' && '❌ Сервер недоступен'}
+                {backendStatus === 'checking' && '🔄 Проверка подключения...'}
+              </div>
+              <div className="websocket-status">
+                WebSocket: {socketConnected ? '🟢 Активен' : '🔴 Неактивен'}
+              </div>
+              {backendStatus === 'error' && (
+                <button onClick={testConnection} className="test-connection-btn">
+                  Проверить подключение
+                </button>
+              )}
+            </div>
           </div>
-          {backendStatus === 'error' && (
-            <button onClick={testConnection} className="test-connection-btn">
-              Проверить подключение
-            </button>
-          )}
         </div>
       </div>
 
       <div className="upload-section">
         <h2>Загрузка файлов</h2>
-        <input
-          ref={fileInputRef}
-          type="file"
-          multiple
-          accept=".mp3,.wav,audio/mp3,audio/wav,audio/mpeg,audio/x-wav"
-          onChange={handleFileSelect}
-          className="file-input"
-          disabled={backendStatus !== 'connected'}
-        />
-        <p>Выберите MP3 или WAV файлы для обработки</p>
+        <div 
+          className={`file-upload-area ${backendStatus !== 'connected' ? 'disabled' : ''} ${dragActive ? 'drag-active' : ''}`}
+          onClick={() => backendStatus === 'connected' && fileInputRef.current?.click()}
+          onDragEnter={handleDragEnter}
+          onDragLeave={handleDragLeave}
+          onDragOver={handleDragOver}
+          onDrop={handleDrop}
+        >
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept=".mp3,.wav,audio/mp3,audio/wav,audio/mpeg,audio/x-wav"
+            onChange={handleFileSelect}
+            className="file-input-hidden"
+            disabled={backendStatus !== 'connected'}
+          />
+          <div className="upload-icon">
+            🎵
+          </div>
+          <div className="upload-text">
+            <h3>Перетащите файлы сюда или нажмите для выбора</h3>
+            <p>Поддерживаются MP3 и WAV файлы</p>
+          </div>
+        </div>
 
         {files.length > 0 && (
           <div className="file-list">
@@ -469,6 +656,18 @@ function App() {
             </label>
           </div>
         </div>
+        <div className="settings-row">
+          <label>Сохранить лог обработки:</label>
+          <div className="checkbox-container">
+            <input
+              type="checkbox"
+              checked={saveLog}
+              onChange={(e) => setSaveLog(e.target.checked)}
+              disabled={processing}
+            />
+            <span>{saveLog ? 'Да (автоматически скачается)' : 'Нет'}</span>
+          </div>
+        </div>
         <p style={{ fontSize: '14px', color: '#666', marginTop: '10px' }}>
           * Значение скорости меньше 1.0 замедляет аудио, больше 1.0 - ускоряет<br/>
           * Rubber Band обеспечивает профессиональное качество обработки
@@ -501,7 +700,10 @@ function App() {
               <div className="processing-log">
                 <div className="log-header">
                   <h4>Лог обработки</h4>
-                  <button onClick={clearLog} className="clear-log-btn">Очистить</button>
+                  <div className="log-buttons">
+                    <button onClick={downloadLog} className="download-log-btn">📄 Скачать лог</button>
+                    <button onClick={clearLog} className="clear-log-btn">Очистить</button>
+                  </div>
                 </div>
                 <div className="log-content">
                   {processingLog.slice(-10).map(entry => (
