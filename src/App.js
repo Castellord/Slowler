@@ -17,103 +17,37 @@ function App() {
   const [socket, setSocket] = useState(null);
   const [socketConnected, setSocketConnected] = useState(false);
   const [dragActive, setDragActive] = useState(false);
-  const [currentSessionId, setCurrentSessionId] = useState(null);
   const fileInputRef = useRef(null);
-
-  // Функция для получения текущего session ID
-  const getCurrentSessionId = () => {
-    return currentSessionId;
-  };
 
   // Проверяем статус бекенда при загрузке и инициализируем WebSocket
   useEffect(() => {
     checkBackendHealth();
     initializeWebSocket();
     
-    // Обработчик закрытия вкладки для отмены обработки
-    const handleBeforeUnload = (event) => {
-      if (processing) {
-        // Отправляем запрос на отмену обработки
-        const sessionId = getCurrentSessionId();
-        if (sessionId) {
-          // Используем sendBeacon для надежной отправки при закрытии
-          navigator.sendBeacon(`/cancel/${sessionId}`, new FormData());
-        }
-      }
-    };
-
-    // Добавляем обработчик
-    window.addEventListener('beforeunload', handleBeforeUnload);
-    
     return () => {
       if (socket) {
         socket.disconnect();
-        setSocket(null); // Очищаем состояние
-      }
-      window.removeEventListener('beforeunload', handleBeforeUnload);
-    };
-  }, []); // Убираем зависимости чтобы выполнялось только один раз
-
-  // Отдельный useEffect для обработчика beforeunload с правильными зависимостями
-  useEffect(() => {
-    const handleBeforeUnload = (event) => {
-      if (processing) {
-        const sessionId = getCurrentSessionId();
-        if (sessionId) {
-          navigator.sendBeacon(`/cancel/${sessionId}`, new FormData());
-        }
       }
     };
-
-    window.addEventListener('beforeunload', handleBeforeUnload);
-    
-    return () => {
-      window.removeEventListener('beforeunload', handleBeforeUnload);
-    };
-  }, [processing, currentSessionId]);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const initializeWebSocket = () => {
-    // Предотвращаем множественные инициализации
-    if (socket) {
-      console.log('🔌 WebSocket уже инициализирован, пропускаем');
-      return;
-    }
-
-    // В production отключаем WebSocket из-за проблем с Traefik
-    if (process.env.NODE_ENV === 'production') {
-      console.log('🔌 Production режим: WebSocket отключен, используем только HTTP polling');
-      setSocketConnected(false);
-      return;
-    }
-
     try {
-      // В development используем localhost
-      const socketUrl = 'http://localhost:5230';
-      
-      console.log('🔌 Инициализация WebSocket:', socketUrl);
-      
-      const newSocket = io(socketUrl, {
-        path: '/socket.io/', // Явно указываем путь для Socket.IO
-        transports: ['polling', 'websocket'], // Сначала пробуем polling, потом websocket
-        timeout: 15000, // Увеличиваем timeout до 15 секунд
-        reconnection: true,
-        reconnectionDelay: 5000, // Увеличиваем задержку переподключения
-        reconnectionAttempts: 2, // Уменьшаем количество попыток
-        forceNew: false, // Не создаем новое соединение если уже есть
-        upgrade: true,
-        rememberUpgrade: false
+      const newSocket = io('http://localhost:5230', {
+        transports: ['websocket', 'polling'],
+        timeout: 5000,
       });
 
       newSocket.on('connect', () => {
-        console.log('🔌 WebSocket подключен к:', socketUrl);
+        console.log('🔌 WebSocket подключен');
         setSocketConnected(true);
         addToLog('📡 WebSocket подключение установлено', 'success');
       });
 
-      newSocket.on('disconnect', (reason) => {
-        console.log('🔌 WebSocket отключен:', reason);
+      newSocket.on('disconnect', () => {
+        console.log('🔌 WebSocket отключен');
         setSocketConnected(false);
-        addToLog('📡 WebSocket подключение потеряно', 'warning');
+        addToLog('📡 WebSocket подключение потеряно', 'error');
       });
 
       newSocket.on('progress_update', (data) => {
@@ -134,12 +68,6 @@ function App() {
 
       newSocket.on('connect_error', (error) => {
         console.error('❌ Ошибка WebSocket подключения:', error);
-        setSocketConnected(false);
-        // Не показываем ошибку в логе, так как fallback на polling сработает
-      });
-
-      newSocket.on('reconnect_failed', () => {
-        console.log('⚠️ WebSocket переподключение не удалось, используем polling');
         setSocketConnected(false);
       });
 
@@ -305,26 +233,12 @@ function App() {
 
   const addBackendLogEntry = (entry) => {
     const timestamp = new Date().toLocaleTimeString();
-    const newEntry = { 
+    setProcessingLog(prev => [...prev, { 
       id: Date.now() + Math.random(), // Уникальный ID
       message: entry.message, 
       type: entry.type, 
       timestamp 
-    };
-
-    // Проверяем дублирование - не добавляем если такое же сообщение было в последние 2 секунды
-    setProcessingLog(prev => {
-      const now = Date.now();
-      const recentEntries = prev.filter(e => now - e.id < 2000); // Последние 2 секунды
-      const isDuplicate = recentEntries.some(e => e.message === entry.message);
-      
-      if (isDuplicate) {
-        console.log('🔄 Пропускаем дублированное сообщение:', entry.message);
-        return prev;
-      }
-      
-      return [...prev, newEntry];
-    });
+    }]);
   };
 
   const getProcessButtonText = () => {
@@ -392,9 +306,6 @@ function App() {
       // Генерируем уникальный ID сессии
       const sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
       formData.append('session_id', sessionId);
-      
-      // Сохраняем session ID для возможной отмены
-      setCurrentSessionId(sessionId);
 
       setCurrentFile('Подключение к серверу...');
       setProgress(5);
@@ -403,12 +314,15 @@ function App() {
       setMessage('🔄 Обработка файлов на сервере...');
 
       // Подключаемся к WebSocket сессии для получения прогресса
-      let progressInterval = null;
+      if (socket && socketConnected) {
+        socket.emit('join_session', { session_id: sessionId });
+        addToLog('📡 Подключились к WebSocket сессии', 'info');
+      } else {
+        addToLog('⚠️ WebSocket недоступен, используем fallback polling', 'warning');
+      }
+
+      // Запускаем fallback polling на случай проблем с WebSocket
       let lastProgressCount = 0;
-      let websocketTimeout = null;
-      let hasReceivedWebSocketData = false;
-      
-      // Функция для polling прогресса
       const pollProgress = async () => {
         try {
           const progressResponse = await fetch(`/progress/${sessionId}`);
@@ -444,48 +358,9 @@ function App() {
           console.error('Ошибка polling прогресса:', error);
         }
       };
-      
-      if (socket && socketConnected) {
-        socket.emit('join_session', { session_id: sessionId });
-        addToLog('📡 Подключились к WebSocket сессии', 'info');
-        addToLog('🚀 Используем WebSocket для real-time обновлений', 'info');
-        
-        // Устанавливаем таймаут для проверки WebSocket
-        websocketTimeout = setTimeout(() => {
-          if (!hasReceivedWebSocketData) {
-            addToLog('⚠️ WebSocket не получает данные, переключаемся на polling', 'warning');
-            // Запускаем polling как fallback
-            progressInterval = setInterval(pollProgress, 2000);
-          }
-        }, 5000); // Ждем 5 секунд для получения первых данных через WebSocket
-        
-        // Обновляем обработчик WebSocket для отслеживания получения данных
-        const originalHandler = socket._callbacks?.$progress_update || [];
-        socket.off('progress_update');
-        socket.on('progress_update', (data) => {
-          hasReceivedWebSocketData = true;
-          clearTimeout(websocketTimeout);
-          
-          console.log('📡 Получен прогресс через WebSocket:', data);
-          
-          // Добавляем сообщение от backend в лог
-          addBackendLogEntry(data);
-          
-          // Обновляем прогресс на основе данных от сервера
-          if (data.file_index !== undefined && data.total_files !== undefined) {
-            updateProgress(data.file_index, data.total_files, data.step || 0, data.message);
-          }
-          
-          if (data.type === 'complete') {
-            addToLog('🎉 Обработка полностью завершена!', 'success');
-          }
-        });
-      } else {
-        addToLog('⚠️ WebSocket недоступен, используем fallback polling', 'warning');
-        
-        // Запускаем polling сразу если WebSocket недоступен
-        progressInterval = setInterval(pollProgress, 2000);
-      }
+
+      // Запускаем polling каждые 2 секунды как fallback
+      const progressInterval = setInterval(pollProgress, 2000);
 
       addToLog('📤 Отправляем запрос на обработку', 'info');
 
@@ -609,25 +484,18 @@ WebSocket подключение: ${socketConnected ? 'Активно' : 'Неа
         <h1>SETINA Slowdown App</h1>
         <p>Профессиональное замедление аудио с использованием Rubber Band алгоритма</p>
         
-        <div className={`backend-status-circle ${backendStatus}`}>
-          <div className="status-dot"></div>
-          <div className="status-tooltip">
-            <div className="status-info">
-              <div className="status-text">
-                {backendStatus === 'connected' && '✅ Сервер подключен'}
-                {backendStatus === 'error' && '❌ Сервер недоступен'}
-                {backendStatus === 'checking' && '🔄 Проверка подключения...'}
-              </div>
-              <div className="websocket-status">
-                WebSocket: {socketConnected ? '🟢 Активен' : '🔴 Неактивен'}
-              </div>
-              {backendStatus === 'error' && (
-                <button onClick={testConnection} className="test-connection-btn">
-                  Проверить подключение
-                </button>
-              )}
-            </div>
+        <div className="backend-status">
+          <div className={`status-indicator ${backendStatus}`}>
+            <span className="status-dot"></span>
+            {backendStatus === 'connected' && 'Сервер подключен'}
+            {backendStatus === 'error' && 'Сервер недоступен'}
+            {backendStatus === 'checking' && 'Проверка подключения...'}
           </div>
+          {backendStatus === 'error' && (
+            <button onClick={testConnection} className="test-connection-btn">
+              Проверить подключение
+            </button>
+          )}
         </div>
       </div>
 

@@ -42,9 +42,8 @@ app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max file size
 UPLOAD_FOLDER = tempfile.mkdtemp()
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
-# Глобальное хранилище прогресса и активных сессий
+# Глобальное хранилище прогресса
 progress_storage = {}
-active_sessions = {}  # Хранилище активных сессий для отмены
 
 def send_progress(session_id, file_index, total_files, step, message, progress_type='info'):
     """Отправляет прогресс через WebSocket и сохраняет для fallback"""
@@ -81,44 +80,15 @@ def send_progress(session_id, file_index, total_files, step, message, progress_t
     
     print(f"✅ Прогресс сохранен для {session_id}: {len(progress_storage[session_id])} записей")
 
-def process_audio_with_rubberband(audio_path, speed_factor, preserve_pitch=True, output_format='wav'):
+def process_audio_with_rubberband(audio_path, speed_factor, preserve_pitch=True):
     """
     Обработка аудио с использованием лучших доступных алгоритмов
     """
     try:
-        # Проверяем, нужно ли изменять скорость
-        if abs(speed_factor - 1.0) < 0.001:  # Скорость практически равна 1.0
-            print(f"⚡ Скорость {speed_factor}x близка к 1.0, пропускаем обработку Rubber Band")
-            
-            # Проверяем входной и выходной форматы
-            input_ext = os.path.splitext(audio_path.lower())[1]
-            
-            if input_ext == '.mp3' and output_format.lower() == 'mp3':
-                print(f"📁 MP3→MP3 без изменения скорости: возвращаем исходный файл")
-                # Возвращаем специальный маркер для прямого копирования
-                return 'DIRECT_COPY', audio_path
-            else:
-                print(f"📁 Выполняем только конвертацию формата")
-                # Просто загружаем и возвращаем аудио без изменения скорости
-                wav_path = convert_to_wav_if_needed(audio_path)
-                y, sr = load_audio_with_scipy(wav_path)
-                
-                if y.ndim == 1:
-                    y = np.array([y, y])
-                
-                # Очищаем временный файл если он был создан
-                if wav_path != audio_path:
-                    try:
-                        os.unlink(wav_path)
-                    except:
-                        pass
-                
-                return y, sr
-        
         # Сначала конвертируем в WAV если нужно
         wav_path = convert_to_wav_if_needed(audio_path)
         
-        # Используем Rubber Band если доступен и скорость отличается от 1.0
+        # Используем Rubber Band если доступен
         if HAS_RUBBERBAND:
             try:
                 print(f"🎵 Используем Rubber Band с файлом: {wav_path}")
@@ -965,27 +935,6 @@ def clear_progress(session_id):
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
-@app.route('/cancel/<session_id>', methods=['POST'])
-def cancel_processing(session_id):
-    """Отмена обработки для сессии"""
-    try:
-        if session_id in active_sessions:
-            active_sessions[session_id]['cancelled'] = True
-            print(f"🛑 Получен запрос на отмену обработки для сессии {session_id}")
-            
-            # Отправляем уведомление через WebSocket
-            socketio.emit('processing_cancelled', {'session_id': session_id}, room=session_id)
-            
-            return jsonify({'success': True, 'message': 'Обработка отменена'})
-        else:
-            return jsonify({'success': False, 'message': 'Сессия не найдена'}), 404
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-def is_session_cancelled(session_id):
-    """Проверка, отменена ли сессия"""
-    return session_id in active_sessions and active_sessions[session_id].get('cancelled', False)
-
 @app.route('/health', methods=['GET'])
 def health_check():
     """Проверка работоспособности сервера"""
@@ -1015,12 +964,6 @@ def process_audio():
         print(f"🎵 Начинаем обработку {len(files)} файлов в формате {output_format.upper()}")
         print(f"⚙️ Настройки: preserve_pitch={preserve_pitch}")
         
-        # Регистрируем активную сессию
-        active_sessions[session_id] = {
-            'cancelled': False,
-            'start_time': threading.current_thread().ident
-        }
-        
         # Отправляем начальный прогресс
         send_progress(session_id, 0, len(files), 0.0, f'Начинаем обработку {len(files)} файлов', 'info')
         
@@ -1030,12 +973,6 @@ def process_audio():
         
         try:
             for i, (file, speed_str) in enumerate(zip(files, speeds)):
-                # Проверяем, не отменена ли обработка
-                if is_session_cancelled(session_id):
-                    print(f"🛑 Обработка отменена для сессии {session_id}")
-                    send_progress(session_id, i, len(files), 0.0, 'Обработка отменена пользователем', 'error')
-                    return jsonify({'error': 'Обработка отменена пользователем'}), 400
-                
                 if file.filename == '':
                     continue
                 
@@ -1057,47 +994,26 @@ def process_audio():
                     print(f"🎛️ Скорость: {speed}x, Формат: {output_format.upper()}")
                     
                     send_progress(session_id, i, len(files), 0.3, f'Обработка {file.filename}', 'info')
-                    result = process_audio_with_rubberband(
-                        input_path, speed, preserve_pitch, output_format
+                    processed_audio, sr = process_audio_with_rubberband(
+                        input_path, speed, preserve_pitch
                     )
                     
-                    # Проверяем, нужно ли прямое копирование
-                    if isinstance(result, tuple) and len(result) == 2 and result[0] == 'DIRECT_COPY':
-                        # Прямое копирование MP3 файла
-                        source_path = result[1]
-                        base_name = os.path.splitext(file.filename)[0]
-                        output_filename = f"{base_name}_slowed.{output_format}"
-                        output_path = os.path.join(temp_dir, output_filename)
-                        
-                        send_progress(session_id, i, len(files), 0.8, f'Копирование {file.filename}', 'info')
-                        print(f"📋 Прямое копирование MP3 файла: {source_path} -> {output_path}")
-                        
-                        # Копируем файл
-                        import shutil
-                        shutil.copy2(source_path, output_path)
-                        
-                        processed_files.append((output_path, output_filename))
-                        print(f"✅ Файл {file.filename} скопирован без обработки")
-                    else:
-                        # Обычная обработка
-                        processed_audio, sr = result
-                        
-                        send_progress(session_id, i, len(files), 0.6, f'Нормализация {file.filename}', 'info')
-                        print(f"🔧 Нормализация аудио...")
-                        # Нормализуем
-                        processed_audio = normalize_audio(processed_audio)
-                        
-                        # Определяем имя и путь выходного файла в зависимости от формата
-                        base_name = os.path.splitext(file.filename)[0]
-                        output_filename = f"{base_name}_slowed.{output_format}"
-                        output_path = os.path.join(temp_dir, output_filename)
-                        
-                        send_progress(session_id, i, len(files), 0.8, f'Сохранение в {output_format.upper()}', 'info')
-                        # Сохраняем результат в выбранном формате
-                        print(f"💾 Сохраняем результат в формате {output_format.upper()}: {processed_audio.shape}, sr={sr}")
-                        
-                        final_path = save_audio_in_format(output_path, processed_audio, sr, output_format)
-                        processed_files.append((final_path, output_filename))
+                    send_progress(session_id, i, len(files), 0.6, f'Нормализация {file.filename}', 'info')
+                    print(f"🔧 Нормализация аудио...")
+                    # Нормализуем
+                    processed_audio = normalize_audio(processed_audio)
+                    
+                    # Определяем имя и путь выходного файла в зависимости от формата
+                    base_name = os.path.splitext(file.filename)[0]
+                    output_filename = f"{base_name}_slowed.{output_format}"
+                    output_path = os.path.join(temp_dir, output_filename)
+                    
+                    send_progress(session_id, i, len(files), 0.8, f'Сохранение в {output_format.upper()}', 'info')
+                    # Сохраняем результат в выбранном формате
+                    print(f"💾 Сохраняем результат в формате {output_format.upper()}: {processed_audio.shape}, sr={sr}")
+                    
+                    final_path = save_audio_in_format(output_path, processed_audio, sr, output_format)
+                    processed_files.append((final_path, output_filename))
                     
                     send_progress(session_id, i, len(files), 1.0, f'Завершено: {file.filename}', 'success')
                     print(f"✅ Файл {file.filename} обработан успешно")

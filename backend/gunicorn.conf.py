@@ -6,12 +6,11 @@ bind = "0.0.0.0:5230"
 backlog = 2048
 
 # Worker processes - reduced for memory efficiency
-workers = 1  # Single worker for eventlet compatibility
-worker_class = "eventlet"  # Use eventlet for WebSocket support
+workers = 2  # Fixed number for better memory control
+worker_class = "sync"
 worker_connections = 1000
-timeout = 1800  # 30 minutes for large file processing
-keepalive = 5
-graceful_timeout = 1800  # Allow graceful shutdown for long operations
+timeout = 1200  # 20 minutes for large file processing
+keepalive = 2
 
 # Restart workers to prevent memory leaks, but not too frequently
 max_requests = 1000  # Restart after more requests
