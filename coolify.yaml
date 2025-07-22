@@ -1,5 +1,5 @@
 # Coolify Configuration for SETINA Slowdown App
-# This file contains deployment configuration for Coolify
+# Using Traefik for routing instead of nginx
 
 version: '3.8'
 
@@ -23,16 +23,26 @@ services:
     labels:
       - "coolify.managed=true"
       - "coolify.name=slowdown-backend"
+      # Backend API routing
+      - "traefik.enable=true"
+      - "traefik.http.routers.slowdown-api.rule=Host(`${FQDN}`) && (PathPrefix(`/process`) || PathPrefix(`/health`) || PathPrefix(`/progress`) || PathPrefix(`/cancel`) || PathPrefix(`/socket.io`))"
+      - "traefik.http.routers.slowdown-api.entrypoints=websecure"
+      - "traefik.http.routers.slowdown-api.tls.certresolver=letsencrypt"
+      - "traefik.http.services.slowdown-api.loadbalancer.server.port=5230"
+      # Large file upload settings
+      - "traefik.http.middlewares.slowdown-api-headers.headers.customrequestheaders.X-Forwarded-Proto=https"
+      - "traefik.http.middlewares.slowdown-api-timeout.forwardauth.address=http://backend:5230"
+      - "traefik.http.routers.slowdown-api.middlewares=slowdown-api-headers"
 
   frontend:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.production
     restart: unless-stopped
     depends_on:
       - backend
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost/"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80/"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -40,11 +50,15 @@ services:
     labels:
       - "coolify.managed=true"
       - "coolify.name=slowdown-frontend"
+      # Frontend routing (catch-all for static files)
       - "traefik.enable=true"
-      - "traefik.http.routers.slowdown.rule=Host(`${FQDN}`)"
-      - "traefik.http.routers.slowdown.entrypoints=websecure"
-      - "traefik.http.routers.slowdown.tls.certresolver=letsencrypt"
-      - "traefik.http.services.slowdown.loadbalancer.server.port=80"
+      - "traefik.http.routers.slowdown-frontend.rule=Host(`${FQDN}`)"
+      - "traefik.http.routers.slowdown-frontend.entrypoints=websecure"
+      - "traefik.http.routers.slowdown-frontend.tls.certresolver=letsencrypt"
+      - "traefik.http.services.slowdown-frontend.loadbalancer.server.port=80"
+      - "traefik.http.routers.slowdown-frontend.priority=1"
+      # Static file caching
+      - "traefik.http.middlewares.slowdown-frontend-headers.headers.customresponseheaders.Cache-Control=public, max-age=31536000"
 
 networks:
   default:
