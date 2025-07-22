@@ -33,21 +33,32 @@ function App() {
 
   const initializeWebSocket = () => {
     try {
-      const newSocket = io('http://localhost:5230', {
-        transports: ['websocket', 'polling'],
-        timeout: 5000,
+      // Определяем URL для WebSocket в зависимости от окружения
+      const socketUrl = process.env.NODE_ENV === 'production' 
+        ? window.location.origin  // В production используем текущий домен
+        : 'http://localhost:5230'; // В development используем localhost
+      
+      console.log('🔌 Инициализация WebSocket:', socketUrl);
+      
+      const newSocket = io(socketUrl, {
+        transports: ['polling', 'websocket'], // Сначала пробуем polling, потом websocket
+        timeout: 10000, // Увеличиваем timeout до 10 секунд
+        reconnection: true,
+        reconnectionDelay: 2000,
+        reconnectionAttempts: 3,
+        forceNew: true
       });
 
       newSocket.on('connect', () => {
-        console.log('🔌 WebSocket подключен');
+        console.log('🔌 WebSocket подключен к:', socketUrl);
         setSocketConnected(true);
         addToLog('📡 WebSocket подключение установлено', 'success');
       });
 
-      newSocket.on('disconnect', () => {
-        console.log('🔌 WebSocket отключен');
+      newSocket.on('disconnect', (reason) => {
+        console.log('🔌 WebSocket отключен:', reason);
         setSocketConnected(false);
-        addToLog('📡 WebSocket подключение потеряно', 'error');
+        addToLog('📡 WebSocket подключение потеряно', 'warning');
       });
 
       newSocket.on('progress_update', (data) => {
@@ -68,6 +79,12 @@ function App() {
 
       newSocket.on('connect_error', (error) => {
         console.error('❌ Ошибка WebSocket подключения:', error);
+        setSocketConnected(false);
+        // Не показываем ошибку в логе, так как fallback на polling сработает
+      });
+
+      newSocket.on('reconnect_failed', () => {
+        console.log('⚠️ WebSocket переподключение не удалось, используем polling');
         setSocketConnected(false);
       });
 
