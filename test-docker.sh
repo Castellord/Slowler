@@ -75,8 +75,8 @@ else
 fi
 
 # Проверяем frontend
-echo "🌐 Проверка frontend (http://localhost:80)..."
-frontend_status=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:80)
+echo "🌐 Проверка frontend (http://localhost:8080)..."
+frontend_status=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080)
 
 if [ "$frontend_status" = "200" ]; then
     echo "✅ Frontend работает (HTTP $frontend_status)"
@@ -100,7 +100,7 @@ echo ""
 echo "🎯 Тестирование завершено!"
 echo ""
 echo "📱 Доступные URL:"
-echo "   Frontend: http://localhost:80"
+echo "   Frontend: http://localhost:8080"
 echo "   Backend API: http://localhost:5230"
 echo "   Health Check: http://localhost:5230/health"
 echo ""
@@ -115,11 +115,11 @@ read -p "🌐 Открыть приложение в браузере? (y/N): " 
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
     if command -v open &> /dev/null; then
-        open http://localhost:80
+        open http://localhost:8080
     elif command -v xdg-open &> /dev/null; then
-        xdg-open http://localhost:80
+        xdg-open http://localhost:8080
     else
-        echo "Откройте http://localhost:80 в браузере"
+        echo "Откройте http://localhost:8080 в браузере"
     fi
 fi
 
