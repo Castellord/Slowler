@@ -17,19 +17,41 @@ function App() {
   const [socket, setSocket] = useState(null);
   const [socketConnected, setSocketConnected] = useState(false);
   const [dragActive, setDragActive] = useState(false);
+  const [currentSessionId, setCurrentSessionId] = useState(null);
   const fileInputRef = useRef(null);
+
+  // Функция для получения текущего session ID
+  const getCurrentSessionId = () => {
+    return currentSessionId;
+  };
 
   // Проверяем статус бекенда при загрузке и инициализируем WebSocket
   useEffect(() => {
     checkBackendHealth();
     initializeWebSocket();
     
+    // Обработчик закрытия вкладки для отмены обработки
+    const handleBeforeUnload = (event) => {
+      if (processing) {
+        // Отправляем запрос на отмену обработки
+        const sessionId = getCurrentSessionId();
+        if (sessionId) {
+          // Используем sendBeacon для надежной отправки при закрытии
+          navigator.sendBeacon(`/cancel/${sessionId}`, new FormData());
+        }
+      }
+    };
+
+    // Добавляем обработчик
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    
     return () => {
       if (socket) {
         socket.disconnect();
       }
+      window.removeEventListener('beforeunload', handleBeforeUnload);
     };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [processing, socket]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const initializeWebSocket = () => {
     try {
@@ -337,6 +359,9 @@ function App() {
       // Генерируем уникальный ID сессии
       const sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
       formData.append('session_id', sessionId);
+      
+      // Сохраняем session ID для возможной отмены
+      setCurrentSessionId(sessionId);
 
       setCurrentFile('Подключение к серверу...');
       setProgress(5);
