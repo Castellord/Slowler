@@ -12,9 +12,9 @@ worker_connections = 1000
 timeout = 1200  # 20 minutes for large file processing
 keepalive = 2
 
-# Restart workers more frequently to prevent memory leaks
-max_requests = 10  # Restart after fewer requests
-max_requests_jitter = 5
+# Restart workers to prevent memory leaks, but not too frequently
+max_requests = 1000  # Restart after more requests
+max_requests_jitter = 100
 worker_tmp_dir = "/dev/shm"  # Use shared memory for temp files
 
 # Request limits - IMPORTANT for large file uploads
