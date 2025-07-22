@@ -33,9 +33,19 @@ function App() {
 
   const initializeWebSocket = () => {
     try {
-      const newSocket = io('http://localhost:5230', {
-        transports: ['websocket', 'polling'],
-        timeout: 5000,
+      // Определяем URL для WebSocket в зависимости от окружения
+      const socketUrl = process.env.NODE_ENV === 'production' 
+        ? window.location.origin  // В production используем текущий домен
+        : 'http://localhost:5230'; // В development используем localhost
+      
+      console.log('🔌 Инициализация WebSocket:', socketUrl);
+      
+      const newSocket = io(socketUrl, {
+        transports: ['polling', 'websocket'], // Сначала пробуем polling, потом websocket
+        timeout: 10000,
+        reconnection: true,
+        reconnectionDelay: 2000,
+        reconnectionAttempts: 3
       });
 
       newSocket.on('connect', () => {
