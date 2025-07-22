@@ -347,52 +347,85 @@ function App() {
       // Подключаемся к WebSocket сессии для получения прогресса
       let progressInterval = null;
       let lastProgressCount = 0;
+      let websocketTimeout = null;
+      let hasReceivedWebSocketData = false;
+      
+      // Функция для polling прогресса
+      const pollProgress = async () => {
+        try {
+          const progressResponse = await fetch(`/progress/${sessionId}`);
+          if (progressResponse.ok) {
+            const progressData = await progressResponse.json();
+            
+            if (progressData.success && progressData.progress.length > lastProgressCount) {
+              // Обрабатываем новые записи прогресса
+              const newEntries = progressData.progress.slice(lastProgressCount);
+              
+              for (const entry of newEntries) {
+                console.log('📊 Получен прогресс через polling:', entry);
+                
+                // Добавляем сообщение от backend в лог
+                addBackendLogEntry(entry);
+                
+                // Обновляем прогресс на основе данных от сервера
+                if (entry.file_index !== undefined && entry.total_files !== undefined) {
+                  updateProgress(entry.file_index, entry.total_files, entry.step || 0, entry.message);
+                }
+                
+                if (entry.type === 'complete') {
+                  addToLog('🎉 Обработка полностью завершена!', 'success');
+                  clearInterval(progressInterval);
+                  return;
+                }
+              }
+              
+              lastProgressCount = progressData.progress.length;
+            }
+          }
+        } catch (error) {
+          console.error('Ошибка polling прогресса:', error);
+        }
+      };
       
       if (socket && socketConnected) {
         socket.emit('join_session', { session_id: sessionId });
         addToLog('📡 Подключились к WebSocket сессии', 'info');
         addToLog('🚀 Используем WebSocket для real-time обновлений', 'info');
+        
+        // Устанавливаем таймаут для проверки WebSocket
+        websocketTimeout = setTimeout(() => {
+          if (!hasReceivedWebSocketData) {
+            addToLog('⚠️ WebSocket не получает данные, переключаемся на polling', 'warning');
+            // Запускаем polling как fallback
+            progressInterval = setInterval(pollProgress, 2000);
+          }
+        }, 5000); // Ждем 5 секунд для получения первых данных через WebSocket
+        
+        // Обновляем обработчик WebSocket для отслеживания получения данных
+        const originalHandler = socket._callbacks?.$progress_update || [];
+        socket.off('progress_update');
+        socket.on('progress_update', (data) => {
+          hasReceivedWebSocketData = true;
+          clearTimeout(websocketTimeout);
+          
+          console.log('📡 Получен прогресс через WebSocket:', data);
+          
+          // Добавляем сообщение от backend в лог
+          addBackendLogEntry(data);
+          
+          // Обновляем прогресс на основе данных от сервера
+          if (data.file_index !== undefined && data.total_files !== undefined) {
+            updateProgress(data.file_index, data.total_files, data.step || 0, data.message);
+          }
+          
+          if (data.type === 'complete') {
+            addToLog('🎉 Обработка полностью завершена!', 'success');
+          }
+        });
       } else {
         addToLog('⚠️ WebSocket недоступен, используем fallback polling', 'warning');
         
-        // Запускаем polling только если WebSocket недоступен
-        const pollProgress = async () => {
-          try {
-            const progressResponse = await fetch(`/progress/${sessionId}`);
-            if (progressResponse.ok) {
-              const progressData = await progressResponse.json();
-              
-              if (progressData.success && progressData.progress.length > lastProgressCount) {
-                // Обрабатываем новые записи прогресса
-                const newEntries = progressData.progress.slice(lastProgressCount);
-                
-                for (const entry of newEntries) {
-                  console.log('📊 Получен прогресс через polling:', entry);
-                  
-                  // Добавляем сообщение от backend в лог
-                  addBackendLogEntry(entry);
-                  
-                  // Обновляем прогресс на основе данных от сервера
-                  if (entry.file_index !== undefined && entry.total_files !== undefined) {
-                    updateProgress(entry.file_index, entry.total_files, entry.step || 0, entry.message);
-                  }
-                  
-                  if (entry.type === 'complete') {
-                    addToLog('🎉 Обработка полностью завершена!', 'success');
-                    clearInterval(progressInterval);
-                    return;
-                  }
-                }
-                
-                lastProgressCount = progressData.progress.length;
-              }
-            }
-          } catch (error) {
-            console.error('Ошибка polling прогресса:', error);
-          }
-        };
-
-        // Запускаем polling каждые 2 секунды только как fallback
+        // Запускаем polling сразу если WebSocket недоступен
         progressInterval = setInterval(pollProgress, 2000);
       }
 
