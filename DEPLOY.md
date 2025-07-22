@@ -76,7 +76,7 @@ NODE_ENV=development
 ```
 
 ### Порты
-- **Frontend**: 80 (production) / 8080 (локальное тестирование) / 3000 (development)
+- **Frontend**: 80 (production) / 3001 (локальное тестирование) / 3000 (development)
 - **Backend**: 5230
 - **Health Check**: `/health`
 
