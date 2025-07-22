@@ -29,10 +29,13 @@ services:
       - "traefik.http.routers.slowdown-api.entrypoints=websecure"
       - "traefik.http.routers.slowdown-api.tls.certresolver=letsencrypt"
       - "traefik.http.services.slowdown-api.loadbalancer.server.port=5230"
+      - "traefik.http.routers.slowdown-api.priority=10"
+      # WebSocket support
+      - "traefik.http.middlewares.slowdown-websocket.headers.customrequestheaders.Connection=upgrade"
+      - "traefik.http.middlewares.slowdown-websocket.headers.customrequestheaders.Upgrade=websocket"
       # Large file upload settings
       - "traefik.http.middlewares.slowdown-api-headers.headers.customrequestheaders.X-Forwarded-Proto=https"
-      - "traefik.http.middlewares.slowdown-api-timeout.forwardauth.address=http://backend:5230"
-      - "traefik.http.routers.slowdown-api.middlewares=slowdown-api-headers"
+      - "traefik.http.routers.slowdown-api.middlewares=slowdown-api-headers,slowdown-websocket"
 
   frontend:
     build:

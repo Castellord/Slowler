@@ -88,12 +88,15 @@ function App() {
       console.log('🔌 Инициализация WebSocket:', socketUrl);
       
       const newSocket = io(socketUrl, {
+        path: '/socket.io/', // Явно указываем путь для Socket.IO
         transports: ['polling', 'websocket'], // Сначала пробуем polling, потом websocket
-        timeout: 10000, // Увеличиваем timeout до 10 секунд
+        timeout: 15000, // Увеличиваем timeout до 15 секунд
         reconnection: true,
         reconnectionDelay: 5000, // Увеличиваем задержку переподключения
-        reconnectionAttempts: 3,
-        forceNew: false // Не создаем новое соединение если уже есть
+        reconnectionAttempts: 2, // Уменьшаем количество попыток
+        forceNew: false, // Не создаем новое соединение если уже есть
+        upgrade: true,
+        rememberUpgrade: false
       });
 
       newSocket.on('connect', () => {
