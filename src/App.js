@@ -230,10 +230,53 @@ function App() {
         }
       };
 
+      addToLog('📤 Отправляем запрос на обработку', 'info');
+
       // Запускаем polling каждые 500ms
       const progressInterval = setInterval(pollProgress, 500);
       
-      addToLog('📤 Отправляем запрос на обработку', 'info');
+      // Переменная для отслеживания завершения
+      let processingComplete = false;
+      
+      // Модифицируем pollProgress для обработки завершения
+      const pollProgressWithCompletion = async () => {
+        try {
+          const progressResponse = await fetch(`/progress/${sessionId}`);
+          if (progressResponse.ok) {
+            const progressData = await progressResponse.json();
+            
+            if (progressData.success && progressData.progress.length > lastProgressCount) {
+              // Обрабатываем новые записи прогресса
+              const newEntries = progressData.progress.slice(lastProgressCount);
+              
+              for (const entry of newEntries) {
+                console.log('Получен прогресс:', entry);
+                
+                if (entry.type === 'complete') {
+                  addToLog('🎉 Обработка полностью завершена!', 'success');
+                  processingComplete = true;
+                  clearInterval(progressInterval);
+                  return;
+                }
+                
+                // Добавляем сообщение от backend в лог
+                addBackendLogEntry(entry);
+                
+                // Обновляем прогресс на основе данных от сервера
+                updateProgress(entry.file_index, entry.total_files, entry.step, entry.message);
+              }
+              
+              lastProgressCount = progressData.progress.length;
+            }
+          }
+        } catch (error) {
+          console.error('Ошибка polling прогресса:', error);
+        }
+      };
+
+      // Заменяем функцию polling
+      clearInterval(progressInterval);
+      const newProgressInterval = setInterval(pollProgressWithCompletion, 500);
 
       // Отправляем запрос на сервер
       const response = await fetch('/process', {
@@ -241,11 +284,16 @@ function App() {
         body: formData,
       });
       
-      // Останавливаем polling после получения ответа
-      clearInterval(progressInterval);
+      // Ждем завершения обработки через polling
+      while (!processingComplete) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        if (!processingComplete) {
+          await pollProgressWithCompletion();
+        }
+      }
       
-      // Получаем последние записи прогресса
-      await pollProgress();
+      // Останавливаем polling
+      clearInterval(newProgressInterval);
 
       if (!response.ok) {
         if (response.status === 413) {
