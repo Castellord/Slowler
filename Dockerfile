@@ -1,18 +1,26 @@
-# Multi-stage build для production
+# Simple Dockerfile for Coolify deployment
 FROM node:18-alpine as build
 
 WORKDIR /app
 
-# Копируем package files
-COPY package*.json ./
-RUN npm ci --only=production
+# Копируем package.json
+COPY package.json ./
 
-# Копируем исходный код и собираем
-COPY . .
+# Устанавливаем зависимости
+RUN npm install
+
+# Копируем исходный код
+COPY src ./src
+COPY public ./public
+
+# Собираем приложение
 RUN npm run build
 
 # Production stage с nginx
 FROM nginx:alpine
+
+# Устанавливаем curl для health checks
+RUN apk add --no-cache curl
 
 # Копируем собранное приложение
 COPY --from=build /app/build /usr/share/nginx/html

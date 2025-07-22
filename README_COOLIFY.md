@@ -146,6 +146,12 @@ docker system prune -a
 docker-compose build --no-cache
 ```
 
+#### Проблема с package-lock.json
+Если возникает ошибка `npm ci` с package-lock.json:
+- Используется `npm install` вместо `npm ci`
+- package-lock.json исключен из .dockerignore
+- Альтернативно можно использовать `Dockerfile.production`
+
 #### Проблемы с backend
 ```bash
 # Проверка health endpoint
