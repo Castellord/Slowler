@@ -3,7 +3,6 @@ import tempfile
 import zipfile
 from flask import Flask, request, jsonify, send_file, Response
 from flask_cors import CORS
-from flask_socketio import SocketIO, emit, join_room, leave_room
 import json
 import threading
 import queue
@@ -12,6 +11,11 @@ import numpy as np
 from scipy import signal
 import io
 import warnings
+import base64
+import matplotlib
+matplotlib.use('Agg')  # Используем non-interactive backend
+import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
 warnings.filterwarnings('ignore')
 
 # Попытка импорта дополнительных библиотек
@@ -34,51 +38,10 @@ except ImportError:
 app = Flask(__name__)
 CORS(app)
 
-# Инициализация SocketIO
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
-
 # Конфигурация
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max file size
 UPLOAD_FOLDER = tempfile.mkdtemp()
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-
-# Глобальное хранилище прогресса
-progress_storage = {}
-
-def send_progress(session_id, file_index, total_files, step, message, progress_type='info'):
-    """Отправляет прогресс через WebSocket и сохраняет для fallback"""
-    print(f"🔄 Отправляем прогресс для сессии {session_id}: {message}")
-    
-    progress_data = {
-        'file_index': file_index,
-        'total_files': total_files,
-        'step': step,
-        'message': message,
-        'type': progress_type,
-        'timestamp': threading.current_thread().ident,
-        'time': str(threading.current_thread().ident)
-    }
-    
-    # Отправляем через WebSocket
-    try:
-        socketio.emit('progress_update', progress_data, room=session_id)
-        # Принудительно отправляем сообщение
-        socketio.sleep(0)  # Позволяет eventlet обработать сообщение
-        print(f"📡 WebSocket сообщение отправлено для {session_id}")
-    except Exception as e:
-        print(f"⚠️ Ошибка отправки WebSocket: {e}")
-    
-    # Сохраняем в глобальное хранилище как fallback
-    if session_id not in progress_storage:
-        progress_storage[session_id] = []
-    
-    progress_storage[session_id].append(progress_data)
-    
-    # Ограничиваем размер лога (последние 50 записей)
-    if len(progress_storage[session_id]) > 50:
-        progress_storage[session_id] = progress_storage[session_id][-50:]
-    
-    print(f"✅ Прогресс сохранен для {session_id}: {len(progress_storage[session_id])} записей")
 
 def process_audio_with_rubberband(audio_path, speed_factor, preserve_pitch=True):
     """
@@ -905,35 +868,6 @@ def convert_wav_to_mp3_with_ffmpeg(wav_path, mp3_path):
         print(f"⚠️ Ошибка конвертации через ffmpeg: {e}")
         raise
 
-@app.route('/progress/<session_id>', methods=['GET'])
-def get_progress(session_id):
-    """Получение прогресса обработки через polling"""
-    try:
-        if session_id in progress_storage:
-            # Возвращаем все записи прогресса для сессии
-            return jsonify({
-                'success': True,
-                'progress': progress_storage[session_id],
-                'count': len(progress_storage[session_id])
-            })
-        else:
-            return jsonify({
-                'success': True,
-                'progress': [],
-                'count': 0
-            })
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-@app.route('/progress/<session_id>/clear', methods=['POST'])
-def clear_progress(session_id):
-    """Очистка прогресса для сессии"""
-    try:
-        if session_id in progress_storage:
-            del progress_storage[session_id]
-        return jsonify({'success': True})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -964,8 +898,7 @@ def process_audio():
         print(f"🎵 Начинаем обработку {len(files)} файлов в формате {output_format.upper()}")
         print(f"⚙️ Настройки: preserve_pitch={preserve_pitch}")
         
-        # Отправляем начальный прогресс
-        send_progress(session_id, 0, len(files), 0.0, f'Начинаем обработку {len(files)} файлов', 'info')
+        print(f"🎵 Начинаем обработку {len(files)} файлов в формате {output_format.upper()}")
         
         # Создаем временную директорию для обработки
         temp_dir = tempfile.mkdtemp()
@@ -989,16 +922,13 @@ def process_audio():
                 
                 # Обрабатываем аудио
                 try:
-                    send_progress(session_id, i, len(files), 0.1, f'Загрузка {file.filename}', 'info')
                     print(f"📁 Обрабатываем файл {i+1}/{len(files)}: {file.filename}")
                     print(f"🎛️ Скорость: {speed}x, Формат: {output_format.upper()}")
                     
-                    send_progress(session_id, i, len(files), 0.3, f'Обработка {file.filename}', 'info')
                     processed_audio, sr = process_audio_with_rubberband(
                         input_path, speed, preserve_pitch
                     )
                     
-                    send_progress(session_id, i, len(files), 0.6, f'Нормализация {file.filename}', 'info')
                     print(f"🔧 Нормализация аудио...")
                     # Нормализуем
                     processed_audio = normalize_audio(processed_audio)
@@ -1008,26 +938,22 @@ def process_audio():
                     output_filename = f"{base_name}_slowed.{output_format}"
                     output_path = os.path.join(temp_dir, output_filename)
                     
-                    send_progress(session_id, i, len(files), 0.8, f'Сохранение в {output_format.upper()}', 'info')
                     # Сохраняем результат в выбранном формате
                     print(f"💾 Сохраняем результат в формате {output_format.upper()}: {processed_audio.shape}, sr={sr}")
                     
                     final_path = save_audio_in_format(output_path, processed_audio, sr, output_format)
                     processed_files.append((final_path, output_filename))
                     
-                    send_progress(session_id, i, len(files), 1.0, f'Завершено: {file.filename}', 'success')
                     print(f"✅ Файл {file.filename} обработан успешно")
                     
                 except Exception as e:
-                    send_progress(session_id, i, len(files), 0.0, f'Ошибка: {file.filename}', 'error')
                     print(f"❌ Ошибка обработки файла {file.filename}: {e}")
                     return jsonify({'error': f'Ошибка обработки файла {file.filename}: {str(e)}'}), 500
             
             if not processed_files:
                 return jsonify({'error': 'Нет файлов для обработки'}), 400
             
-            # Отправляем прогресс создания архива
-            send_progress(session_id, len(files), len(files), 0.9, 'Создание ZIP архива', 'info')
+            print("📦 Создание ZIP архива...")
             
             # Создаем ZIP архив
             zip_buffer = io.BytesIO()
@@ -1037,8 +963,7 @@ def process_audio():
             
             zip_buffer.seek(0)
             
-            # Отправляем сигнал о завершении
-            send_progress(session_id, len(files), len(files), 1.0, 'Обработка завершена!', 'complete')
+            print("✅ Обработка завершена!")
             
             return send_file(
                 zip_buffer,
@@ -1101,50 +1026,1154 @@ def test_processing():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-# WebSocket обработчики
-@socketio.on('connect')
-def handle_connect():
-    """Обработка подключения клиента"""
-    print(f"🔌 Клиент подключился: {request.sid}")
-    emit('connected', {'message': 'Подключение к серверу установлено'})
 
-@socketio.on('disconnect')
-def handle_disconnect():
-    """Обработка отключения клиента"""
-    print(f"🔌 Клиент отключился: {request.sid}")
+def analyze_audio_file(audio_path):
+    """
+    Анализ аудио файла для получения аналитических данных
+    """
+    try:
+        print(f"🔍 Анализируем аудио файл: {audio_path}")
+        
+        # Загружаем аудио файл
+        y, sr = librosa.load(audio_path, sr=None, mono=False)
+        
+        # Если стерео, берем среднее для анализа
+        if y.ndim == 2:
+            y_mono = np.mean(y, axis=0)
+        else:
+            y_mono = y
+        
+        # Базовая информация о файле
+        duration = len(y_mono) / sr
+        file_size = os.path.getsize(audio_path)
+        
+        # Определяем формат файла
+        _, ext = os.path.splitext(audio_path.lower())
+        audio_format = ext[1:].upper() if ext else 'Unknown'
+        
+        # Определяем разрядность (приблизительно)
+        bit_depth = 16  # По умолчанию для большинства файлов
+        if audio_format == 'WAV':
+            try:
+                from scipy.io import wavfile
+                _, data = wavfile.read(audio_path)
+                if data.dtype == np.int16:
+                    bit_depth = 16
+                elif data.dtype == np.int32:
+                    bit_depth = 32
+                elif data.dtype == np.float32:
+                    bit_depth = 32
+            except:
+                pass
+        
+        # Анализ BPM (темп)
+        print("🥁 Анализируем BPM...")
+        try:
+            tempo, beats = librosa.beat.beat_track(y=y_mono, sr=sr)
+            bpm = float(tempo)
+        except:
+            bpm = None
+        
+        # Анализ тональности
+        print("🎼 Анализируем тональность...")
+        try:
+            # Используем chroma features для определения тональности
+            chroma = librosa.feature.chroma_stft(y=y_mono, sr=sr)
+            chroma_mean = np.mean(chroma, axis=1)
+            
+            # Определяем основную тональность
+            key_names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+            key_index = np.argmax(chroma_mean)
+            key = key_names[key_index]
+            
+            # Определяем мажор/минор (упрощенно)
+            # Анализируем интервалы для определения лада
+            major_profile = np.array([1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1])
+            minor_profile = np.array([1, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1, 0])
+            
+            # Сдвигаем профили в соответствии с найденной тональностью
+            major_shifted = np.roll(major_profile, key_index)
+            minor_shifted = np.roll(minor_profile, key_index)
+            
+            # Вычисляем корреляцию
+            major_corr = np.corrcoef(chroma_mean, major_shifted)[0, 1]
+            minor_corr = np.corrcoef(chroma_mean, minor_shifted)[0, 1]
+            
+            if major_corr > minor_corr:
+                key_signature = f"{key} Major"
+            else:
+                key_signature = f"{key} Minor"
+                
+        except Exception as e:
+            print(f"⚠️ Ошибка анализа тональности: {e}")
+            key_signature = "Unknown"
+        
+        # Спектральный анализ
+        print("📊 Создаем спектрограмму...")
+        try:
+            # Создаем спектрограмму
+            D = librosa.stft(y_mono)
+            S_db = librosa.amplitude_to_db(np.abs(D), ref=np.max)
+            
+            # Создаем изображение спектрограммы
+            plt.figure(figsize=(12, 6))
+            plt.style.use('dark_background')
+            
+            # Настраиваем цветовую схему
+            colors = ['#0a0a0f', '#1a1a2e', '#8b5cf6', '#a78bfa', '#ffffff']
+            n_bins = 256
+            cmap = LinearSegmentedColormap.from_list('custom', colors, N=n_bins)
+            
+            librosa.display.specshow(
+                S_db, 
+                sr=sr, 
+                x_axis='time', 
+                y_axis='hz',
+                cmap=cmap,
+                fmax=8000  # Ограничиваем частоты для лучшей визуализации
+            )
+            
+            plt.colorbar(format='%+2.0f dB', label='Amplitude (dB)')
+            plt.title('Спектрограмма', color='white', fontsize=14, pad=20)
+            plt.xlabel('Время (с)', color='white')
+            plt.ylabel('Частота (Гц)', color='white')
+            
+            # Настраиваем внешний вид
+            plt.gca().set_facecolor('#0a0a0f')
+            plt.gcf().patch.set_facecolor('#0a0a0f')
+            plt.tick_params(colors='white')
+            
+            # Сохраняем в буфер
+            buffer = io.BytesIO()
+            plt.savefig(buffer, format='png', dpi=100, bbox_inches='tight', 
+                       facecolor='#0a0a0f', edgecolor='none')
+            buffer.seek(0)
+            
+            # Кодируем в base64
+            spectrogram_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+            plt.close()
+            
+        except Exception as e:
+            print(f"⚠️ Ошибка создания спектрограммы: {e}")
+            spectrogram_base64 = None
+        
+        # Дополнительные аналитические данные
+        print("📈 Вычисляем дополнительные метрики...")
+        try:
+            # RMS энергия
+            rms = librosa.feature.rms(y=y_mono)[0]
+            avg_rms = float(np.mean(rms))
+            
+            # Спектральный центроид (яркость)
+            spectral_centroids = librosa.feature.spectral_centroid(y=y_mono, sr=sr)[0]
+            avg_spectral_centroid = float(np.mean(spectral_centroids))
+            
+            # Zero crossing rate (характеризует перкуссивность)
+            zcr = librosa.feature.zero_crossing_rate(y_mono)[0]
+            avg_zcr = float(np.mean(zcr))
+            
+            # Спектральная полоса пропускания
+            spectral_bandwidth = librosa.feature.spectral_bandwidth(y=y_mono, sr=sr)[0]
+            avg_bandwidth = float(np.mean(spectral_bandwidth))
+            
+        except Exception as e:
+            print(f"⚠️ Ошибка вычисления метрик: {e}")
+            avg_rms = None
+            avg_spectral_centroid = None
+            avg_zcr = None
+            avg_bandwidth = None
+        
+        # Вычисляем расширенные характеристики для анализа жанра
+        try:
+            print("🎼 Анализируем расширенные характеристики...")
+            
+            # Спектральный роллофф (частота, ниже которой содержится 85% энергии)
+            rolloff = librosa.feature.spectral_rolloff(y=y_mono, sr=sr)[0]
+            avg_rolloff = float(np.mean(rolloff))
+            
+            # MFCC (мел-частотные кепстральные коэффициенты)
+            mfccs = librosa.feature.mfcc(y=y_mono, sr=sr, n_mfcc=13)
+            mfcc_mean = np.mean(mfccs, axis=1)
+            
+            # Спектральный контраст
+            contrast = librosa.feature.spectral_contrast(y=y_mono, sr=sr)
+            avg_contrast = float(np.mean(contrast))
+            
+            # Анализ частотного баланса
+            freq_balance = analyze_frequency_balance(y_mono, sr)
+            
+            # Анализ гармонической сложности
+            harmonic_complexity = analyze_harmonic_complexity(y_mono, sr)
+            
+            # Анализ ритмической регулярности
+            rhythmic_regularity = analyze_rhythmic_regularity(y_mono, sr)
+            
+            # Анализ вероятности наличия вокала
+            vocal_likelihood = analyze_vocal_presence(y_mono, sr, mfccs)
+            
+            # Анализ перкуссивности
+            percussive_strength = analyze_percussive_strength(y_mono, sr)
+            
+            # Анализ присутствия синтезаторов
+            synth_presence = analyze_synth_presence(y_mono, sr, mfccs, avg_contrast)
+            
+            # Собираем все расширенные характеристики
+            extended_features = {
+                'rolloff': avg_rolloff,
+                'mfcc_mean': mfcc_mean,
+                'contrast': avg_contrast,
+                'bass_emphasis': freq_balance['bass_emphasis'],
+                'mid_freq_balance': freq_balance['mid_freq_balance'],
+                'high_freq_presence': freq_balance['high_freq_presence'],
+                'harmonic_complexity': harmonic_complexity,
+                'rhythmic_regularity': rhythmic_regularity,
+                'vocal_likelihood': vocal_likelihood,
+                'percussive_strength': percussive_strength,
+                'synth_presence': synth_presence
+            }
+            
+        except Exception as e:
+            print(f"⚠️ Ошибка вычисления расширенных характеристик: {e}")
+            extended_features = {
+                'rolloff': None,
+                'mfcc_mean': None,
+                'contrast': None,
+                'bass_emphasis': 0.3,
+                'mid_freq_balance': 0.4,
+                'high_freq_presence': 0.3,
+                'harmonic_complexity': 0.5,
+                'rhythmic_regularity': 0.7,
+                'vocal_likelihood': 0.3,
+                'percussive_strength': 0.6,
+                'synth_presence': 0.5
+            }
 
-@socketio.on('join_session')
-def handle_join_session(data):
-    """Присоединение к сессии для получения обновлений прогресса"""
-    session_id = data.get('session_id')
-    if session_id:
-        join_room(session_id)
-        print(f"👥 Клиент {request.sid} присоединился к сессии {session_id}")
-        emit('session_joined', {'session_id': session_id})
+        # Анализ жанра
+        print("🎭 Анализируем жанр...")
+        try:
+            genre_info = analyze_genre(y_mono, sr, bpm, avg_spectral_centroid, avg_zcr, avg_rms, avg_bandwidth, extended_features)
+        except Exception as e:
+            print(f"⚠️ Ошибка анализа жанра: {e}")
+            genre_info = {
+                'predicted_genre': 'Unknown',
+                'confidence': 0.0,
+                'genre_probabilities': {}
+            }
+        
+        # Формируем результат
+        analysis_result = {
+            'success': True,
+            'basic_info': {
+                'duration': round(duration, 2),
+                'sample_rate': int(sr),
+                'channels': y.shape[0] if y.ndim == 2 else 1,
+                'file_size': file_size,
+                'format': audio_format,
+                'bit_depth': bit_depth
+            },
+            'musical_analysis': {
+                'bpm': round(bpm, 1) if bpm else None,
+                'key_signature': key_signature,
+                'tempo_description': get_tempo_description(bpm) if bpm else None,
+                'genre': genre_info['predicted_genre'],
+                'genre_confidence': genre_info['confidence'],
+                'genre_probabilities': genre_info['genre_probabilities']
+            },
+            'spectral_analysis': {
+                'spectrogram': spectrogram_base64,
+                'avg_rms': round(avg_rms, 4) if avg_rms else None,
+                'spectral_centroid': round(avg_spectral_centroid, 1) if avg_spectral_centroid else None,
+                'zero_crossing_rate': round(avg_zcr, 4) if avg_zcr else None,
+                'spectral_bandwidth': round(avg_bandwidth, 1) if avg_bandwidth else None
+            }
+        }
+        
+        print("✅ Анализ аудио завершен успешно")
+        return analysis_result
+        
+    except Exception as e:
+        print(f"❌ Ошибка анализа аудио: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            'success': False,
+            'error': str(e)
+        }
 
-@socketio.on('leave_session')
-def handle_leave_session(data):
-    """Покидание сессии"""
-    session_id = data.get('session_id')
-    if session_id:
-        leave_room(session_id)
-        print(f"👥 Клиент {request.sid} покинул сессию {session_id}")
-        emit('session_left', {'session_id': session_id})
+def analyze_genre(y, sr, bpm, spectral_centroid, zcr, rms, bandwidth, extended_features):
+    """
+    Расширенный анализ жанра электронной музыки с детальными критериями
+    """
+    # 20 основных жанров электронной музыки с расширенными характеристиками
+    electronic_genres = {
+        'House': {
+            'bpm_range': (120, 130),
+            'spectral_centroid_range': (1500, 3000),
+            'zcr_range': (0.05, 0.15),
+            'rms_range': (0.1, 0.3),
+            'bandwidth_range': (1000, 2500),
+            # Расширенные критерии
+            'bass_emphasis': (0.15, 0.35),  # Сильный бас, но не доминирующий
+            'mid_freq_balance': (0.25, 0.45),  # Сбалансированные средние частоты
+            'high_freq_presence': (0.20, 0.40),  # Умеренные высокие частоты
+            'harmonic_complexity': (0.3, 0.6),  # Средняя гармоническая сложность
+            'rhythmic_regularity': (0.7, 0.9),  # Очень регулярный ритм
+            'vocal_likelihood': (0.2, 0.7),  # Может содержать вокал
+            'percussive_strength': (0.6, 0.8),  # Сильная перкуссия
+            'synth_presence': (0.5, 0.8)  # Заметное присутствие синтезаторов
+        },
+        'Techno': {
+            'bpm_range': (120, 150),
+            'spectral_centroid_range': (2000, 4000),
+            'zcr_range': (0.08, 0.20),
+            'rms_range': (0.15, 0.35),
+            'bandwidth_range': (1500, 3000),
+            'bass_emphasis': (0.25, 0.45),
+            'mid_freq_balance': (0.30, 0.50),
+            'high_freq_presence': (0.35, 0.55),
+            'harmonic_complexity': (0.2, 0.5),  # Менее сложная гармония
+            'rhythmic_regularity': (0.8, 0.95),  # Очень регулярный ритм
+            'vocal_likelihood': (0.0, 0.3),  # Редко содержит вокал
+            'percussive_strength': (0.7, 0.9),  # Очень сильная перкуссия
+            'synth_presence': (0.6, 0.9)  # Сильное присутствие синтезаторов
+        },
+        'Trance': {
+            'bpm_range': (125, 140),
+            'spectral_centroid_range': (2500, 5000),
+            'zcr_range': (0.06, 0.16),
+            'rms_range': (0.12, 0.30),
+            'bandwidth_range': (2000, 4000),
+            'bass_emphasis': (0.20, 0.40),
+            'mid_freq_balance': (0.35, 0.55),
+            'high_freq_presence': (0.40, 0.70),  # Яркие высокие частоты
+            'harmonic_complexity': (0.4, 0.7),  # Сложная гармония
+            'rhythmic_regularity': (0.7, 0.9),
+            'vocal_likelihood': (0.3, 0.8),  # Часто содержит вокал
+            'percussive_strength': (0.5, 0.7),
+            'synth_presence': (0.7, 0.95)  # Очень сильное присутствие синтезаторов
+        },
+        'Dubstep': {
+            'bpm_range': (135, 145),
+            'spectral_centroid_range': (1000, 3500),
+            'zcr_range': (0.10, 0.25),
+            'rms_range': (0.20, 0.45),
+            'bandwidth_range': (1500, 4000),
+            'bass_emphasis': (0.40, 0.70),  # Очень сильный бас
+            'mid_freq_balance': (0.20, 0.40),
+            'high_freq_presence': (0.25, 0.50),
+            'harmonic_complexity': (0.3, 0.6),
+            'rhythmic_regularity': (0.4, 0.7),  # Менее регулярный ритм
+            'vocal_likelihood': (0.2, 0.6),
+            'percussive_strength': (0.6, 0.8),
+            'synth_presence': (0.6, 0.9)
+        },
+        'Drum and Bass': {
+            'bpm_range': (160, 180),
+            'spectral_centroid_range': (2000, 5000),
+            'zcr_range': (0.15, 0.30),
+            'rms_range': (0.18, 0.40),
+            'bandwidth_range': (2500, 5000),
+            'bass_emphasis': (0.35, 0.60),  # Сильный бас
+            'mid_freq_balance': (0.25, 0.45),
+            'high_freq_presence': (0.30, 0.60),
+            'harmonic_complexity': (0.3, 0.6),
+            'rhythmic_regularity': (0.5, 0.8),  # Сложные ритмы
+            'vocal_likelihood': (0.1, 0.5),
+            'percussive_strength': (0.8, 0.95),  # Очень сильная перкуссия
+            'synth_presence': (0.4, 0.7)
+        },
+        'Ambient': {
+            'bpm_range': (60, 90),
+            'spectral_centroid_range': (800, 2000),
+            'zcr_range': (0.02, 0.08),
+            'rms_range': (0.05, 0.15),
+            'bandwidth_range': (500, 1500),
+            'bass_emphasis': (0.10, 0.30),  # Мягкий бас
+            'mid_freq_balance': (0.30, 0.60),
+            'high_freq_presence': (0.20, 0.50),
+            'harmonic_complexity': (0.5, 0.8),  # Сложная гармония
+            'rhythmic_regularity': (0.2, 0.5),  # Слабый ритм
+            'vocal_likelihood': (0.1, 0.4),
+            'percussive_strength': (0.1, 0.3),  # Слабая перкуссия
+            'synth_presence': (0.6, 0.9)  # Много синтезаторных текстур
+        },
+        'Breakbeat': {
+            'bpm_range': (120, 140),
+            'spectral_centroid_range': (1500, 3500),
+            'zcr_range': (0.12, 0.25),
+            'rms_range': (0.15, 0.35),
+            'bandwidth_range': (1800, 3500),
+            'bass_emphasis': (0.25, 0.45),
+            'mid_freq_balance': (0.30, 0.50),
+            'high_freq_presence': (0.25, 0.45),
+            'harmonic_complexity': (0.3, 0.6),
+            'rhythmic_regularity': (0.3, 0.6),  # Нерегулярные ритмы
+            'vocal_likelihood': (0.2, 0.6),
+            'percussive_strength': (0.7, 0.9),  # Сильная перкуссия
+            'synth_presence': (0.4, 0.7)
+        },
+        'Electro': {
+            'bpm_range': (110, 130),
+            'spectral_centroid_range': (1800, 4000),
+            'zcr_range': (0.08, 0.18),
+            'rms_range': (0.12, 0.28),
+            'bandwidth_range': (1500, 3000),
+            'bass_emphasis': (0.30, 0.50),
+            'mid_freq_balance': (0.25, 0.45),
+            'high_freq_presence': (0.30, 0.55),
+            'harmonic_complexity': (0.2, 0.5),
+            'rhythmic_regularity': (0.6, 0.8),
+            'vocal_likelihood': (0.1, 0.4),
+            'percussive_strength': (0.6, 0.8),
+            'synth_presence': (0.7, 0.9)  # Характерные электро-синтезаторы
+        },
+        'Progressive House': {
+            'bpm_range': (120, 130),
+            'spectral_centroid_range': (2000, 4500),
+            'zcr_range': (0.06, 0.14),
+            'rms_range': (0.10, 0.25),
+            'bandwidth_range': (1800, 3500),
+            'bass_emphasis': (0.20, 0.40),
+            'mid_freq_balance': (0.35, 0.55),
+            'high_freq_presence': (0.35, 0.60),
+            'harmonic_complexity': (0.5, 0.8),  # Сложная прогрессивная гармония
+            'rhythmic_regularity': (0.6, 0.8),
+            'vocal_likelihood': (0.3, 0.7),
+            'percussive_strength': (0.5, 0.7),
+            'synth_presence': (0.6, 0.9)
+        },
+        'Deep House': {
+            'bpm_range': (115, 125),
+            'spectral_centroid_range': (1200, 2500),
+            'zcr_range': (0.04, 0.12),
+            'rms_range': (0.08, 0.22),
+            'bandwidth_range': (1000, 2200),
+            'bass_emphasis': (0.25, 0.50),  # Глубокий бас
+            'mid_freq_balance': (0.30, 0.50),
+            'high_freq_presence': (0.15, 0.35),  # Приглушенные высокие
+            'harmonic_complexity': (0.4, 0.7),
+            'rhythmic_regularity': (0.7, 0.9),
+            'vocal_likelihood': (0.4, 0.8),  # Часто содержит вокал
+            'percussive_strength': (0.4, 0.6),  # Мягкая перкуссия
+            'synth_presence': (0.5, 0.8)
+        },
+        'Trap': {
+            'bpm_range': (130, 170),
+            'spectral_centroid_range': (1500, 4000),
+            'zcr_range': (0.10, 0.22),
+            'rms_range': (0.15, 0.35),
+            'bandwidth_range': (1800, 4000),
+            'bass_emphasis': (0.35, 0.65),  # Сильный 808 бас
+            'mid_freq_balance': (0.20, 0.40),
+            'high_freq_presence': (0.30, 0.55),
+            'harmonic_complexity': (0.2, 0.5),
+            'rhythmic_regularity': (0.5, 0.7),
+            'vocal_likelihood': (0.3, 0.8),  # Часто содержит рэп
+            'percussive_strength': (0.7, 0.9),  # Характерные trap хэты
+            'synth_presence': (0.4, 0.7)
+        },
+        'Future Bass': {
+            'bpm_range': (130, 160),
+            'spectral_centroid_range': (2500, 6000),
+            'zcr_range': (0.08, 0.18),
+            'rms_range': (0.12, 0.30),
+            'bandwidth_range': (2000, 5000),
+            'bass_emphasis': (0.25, 0.50),
+            'mid_freq_balance': (0.30, 0.50),
+            'high_freq_presence': (0.40, 0.70),  # Яркие высокие частоты
+            'harmonic_complexity': (0.4, 0.7),
+            'rhythmic_regularity': (0.5, 0.7),
+            'vocal_likelihood': (0.4, 0.8),  # Часто содержит вокал
+            'percussive_strength': (0.5, 0.7),
+            'synth_presence': (0.7, 0.95)  # Характерные future bass синтезаторы
+        },
+        'Hardstyle': {
+            'bpm_range': (140, 160),
+            'spectral_centroid_range': (2000, 5000),
+            'zcr_range': (0.12, 0.25),
+            'rms_range': (0.20, 0.40),
+            'bandwidth_range': (2500, 5000),
+            'bass_emphasis': (0.30, 0.55),
+            'mid_freq_balance': (0.25, 0.45),
+            'high_freq_presence': (0.35, 0.65),
+            'harmonic_complexity': (0.2, 0.5),
+            'rhythmic_regularity': (0.8, 0.95),  # Очень регулярный ритм
+            'vocal_likelihood': (0.2, 0.6),
+            'percussive_strength': (0.8, 0.95),  # Характерный hardstyle kick
+            'synth_presence': (0.6, 0.9)
+        },
+        'Minimal': {
+            'bpm_range': (120, 135),
+            'spectral_centroid_range': (1000, 2500),
+            'zcr_range': (0.04, 0.12),
+            'rms_range': (0.08, 0.20),
+            'bandwidth_range': (800, 2000),
+            'bass_emphasis': (0.20, 0.40),
+            'mid_freq_balance': (0.25, 0.45),
+            'high_freq_presence': (0.15, 0.35),
+            'harmonic_complexity': (0.2, 0.4),  # Простая гармония
+            'rhythmic_regularity': (0.7, 0.9),
+            'vocal_likelihood': (0.0, 0.3),  # Редко содержит вокал
+            'percussive_strength': (0.5, 0.7),
+            'synth_presence': (0.3, 0.6)  # Минимальное использование синтезаторов
+        },
+        'Garage': {
+            'bpm_range': (125, 140),
+            'spectral_centroid_range': (1500, 3500),
+            'zcr_range': (0.10, 0.20),
+            'rms_range': (0.12, 0.28),
+            'bandwidth_range': (1500, 3000),
+            'bass_emphasis': (0.25, 0.45),
+            'mid_freq_balance': (0.30, 0.50),
+            'high_freq_presence': (0.25, 0.45),
+            'harmonic_complexity': (0.3, 0.6),
+            'rhythmic_regularity': (0.4, 0.7),  # Характерные garage ритмы
+            'vocal_likelihood': (0.3, 0.7),
+            'percussive_strength': (0.6, 0.8),
+            'synth_presence': (0.4, 0.7)
+        },
+        'IDM': {
+            'bpm_range': (80, 160),
+            'spectral_centroid_range': (1500, 4500),
+            'zcr_range': (0.08, 0.25),
+            'rms_range': (0.10, 0.30),
+            'bandwidth_range': (1500, 4000),
+            'bass_emphasis': (0.15, 0.45),
+            'mid_freq_balance': (0.25, 0.55),
+            'high_freq_presence': (0.30, 0.60),
+            'harmonic_complexity': (0.6, 0.9),  # Очень сложная гармония
+            'rhythmic_regularity': (0.2, 0.5),  # Нерегулярные ритмы
+            'vocal_likelihood': (0.1, 0.4),
+            'percussive_strength': (0.3, 0.7),
+            'synth_presence': (0.5, 0.8)
+        },
+        'Psytrance': {
+            'bpm_range': (140, 150),
+            'spectral_centroid_range': (2500, 6000),
+            'zcr_range': (0.10, 0.20),
+            'rms_range': (0.15, 0.35),
+            'bandwidth_range': (2500, 5500),
+            'bass_emphasis': (0.25, 0.45),
+            'mid_freq_balance': (0.30, 0.50),
+            'high_freq_presence': (0.40, 0.70),
+            'harmonic_complexity': (0.4, 0.7),
+            'rhythmic_regularity': (0.7, 0.9),
+            'vocal_likelihood': (0.0, 0.2),  # Редко содержит вокал
+            'percussive_strength': (0.6, 0.8),
+            'synth_presence': (0.8, 0.95)  # Очень много психоделических синтезаторов
+        },
+        'Synthwave': {
+            'bpm_range': (100, 120),
+            'spectral_centroid_range': (1500, 3500),
+            'zcr_range': (0.05, 0.15),
+            'rms_range': (0.10, 0.25),
+            'bandwidth_range': (1200, 2800),
+            'bass_emphasis': (0.20, 0.40),
+            'mid_freq_balance': (0.35, 0.55),
+            'high_freq_presence': (0.25, 0.50),
+            'harmonic_complexity': (0.4, 0.7),
+            'rhythmic_regularity': (0.6, 0.8),
+            'vocal_likelihood': (0.2, 0.6),
+            'percussive_strength': (0.4, 0.6),
+            'synth_presence': (0.8, 0.95)  # Характерные ретро-синтезаторы
+        },
+        'Chillout': {
+            'bpm_range': (80, 110),
+            'spectral_centroid_range': (1000, 2500),
+            'zcr_range': (0.03, 0.10),
+            'rms_range': (0.06, 0.18),
+            'bandwidth_range': (800, 2000),
+            'bass_emphasis': (0.15, 0.35),
+            'mid_freq_balance': (0.35, 0.60),
+            'high_freq_presence': (0.20, 0.45),
+            'harmonic_complexity': (0.4, 0.7),
+            'rhythmic_regularity': (0.4, 0.7),
+            'vocal_likelihood': (0.3, 0.7),
+            'percussive_strength': (0.2, 0.4),  # Мягкая перкуссия
+            'synth_presence': (0.5, 0.8)
+        },
+        'Bass Music': {
+            'bpm_range': (130, 150),
+            'spectral_centroid_range': (800, 2500),
+            'zcr_range': (0.08, 0.20),
+            'rms_range': (0.18, 0.40),
+            'bandwidth_range': (1000, 3000),
+            'bass_emphasis': (0.50, 0.80),  # Доминирующий бас
+            'mid_freq_balance': (0.15, 0.35),
+            'high_freq_presence': (0.20, 0.40),
+            'harmonic_complexity': (0.2, 0.5),
+            'rhythmic_regularity': (0.5, 0.7),
+            'vocal_likelihood': (0.2, 0.6),
+            'percussive_strength': (0.6, 0.8),
+            'synth_presence': (0.6, 0.9)  # Басовые синтезаторы
+        }
+    }
+    
+    # Вычисляем расширенные характеристики для анализа жанра
+    try:
+        print("🎼 Анализируем расширенные характеристики...")
+        
+        # Спектральный роллофф (частота, ниже которой содержится 85% энергии)
+        rolloff = librosa.feature.spectral_rolloff(y=y, sr=sr)[0]
+        avg_rolloff = float(np.mean(rolloff))
+        
+        # MFCC (мел-частотные кепстральные коэффициенты)
+        mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+        mfcc_mean = np.mean(mfccs, axis=1)
+        
+        # Спектральный контраст
+        contrast = librosa.feature.spectral_contrast(y=y, sr=sr)
+        avg_contrast = float(np.mean(contrast))
+        
+        # Анализ частотного баланса
+        freq_balance = analyze_frequency_balance(y, sr)
+        
+        # Анализ гармонической сложности
+        harmonic_complexity = analyze_harmonic_complexity(y, sr)
+        
+        # Анализ ритмической регулярности
+        rhythmic_regularity = analyze_rhythmic_regularity(y, sr)
+        
+        # Анализ вероятности наличия вокала
+        vocal_likelihood = analyze_vocal_presence(y, sr, mfccs)
+        
+        # Анализ перкуссивности
+        percussive_strength = analyze_percussive_strength(y, sr)
+        
+        # Анализ присутствия синтезаторов
+        synth_presence = analyze_synth_presence(y, sr, mfccs, avg_contrast)
+        
+        # Собираем все расширенные характеристики
+        extended_features = {
+            'rolloff': avg_rolloff,
+            'mfcc_mean': mfcc_mean,
+            'contrast': avg_contrast,
+            'bass_emphasis': freq_balance['bass_emphasis'],
+            'mid_freq_balance': freq_balance['mid_freq_balance'],
+            'high_freq_presence': freq_balance['high_freq_presence'],
+            'harmonic_complexity': harmonic_complexity,
+            'rhythmic_regularity': rhythmic_regularity,
+            'vocal_likelihood': vocal_likelihood,
+            'percussive_strength': percussive_strength,
+            'synth_presence': synth_presence
+        }
+        
+    except Exception as e:
+        print(f"⚠️ Ошибка вычисления расширенных характеристик: {e}")
+        extended_features = {
+            'rolloff': None,
+            'mfcc_mean': None,
+            'contrast': None,
+            'bass_emphasis': 0.3,
+            'mid_freq_balance': 0.4,
+            'high_freq_presence': 0.3,
+            'harmonic_complexity': 0.5,
+            'rhythmic_regularity': 0.7,
+            'vocal_likelihood': 0.3,
+            'percussive_strength': 0.6,
+            'synth_presence': 0.5
+        }
+    
+    # Вычисляем вероятности для каждого жанра
+    genre_scores = {}
+    
+    for genre, characteristics in electronic_genres.items():
+        score = 0.0
+        total_weight = 0.0
+        
+        # BPM (вес 0.3)
+        if bpm is not None:
+            bpm_min, bpm_max = characteristics['bpm_range']
+            if bpm_min <= bpm <= bpm_max:
+                score += 0.3
+            else:
+                # Штраф за отклонение от диапазона
+                deviation = min(abs(bpm - bpm_min), abs(bpm - bpm_max))
+                penalty = max(0, 0.3 - deviation / 50.0)  # Уменьшаем штраф постепенно
+                score += penalty
+            total_weight += 0.3
+        
+        # Спектральный центроид (вес 0.25)
+        if spectral_centroid is not None:
+            sc_min, sc_max = characteristics['spectral_centroid_range']
+            if sc_min <= spectral_centroid <= sc_max:
+                score += 0.25
+            else:
+                deviation = min(abs(spectral_centroid - sc_min), abs(spectral_centroid - sc_max))
+                penalty = max(0, 0.25 - deviation / 2000.0)
+                score += penalty
+            total_weight += 0.25
+        
+        # Zero Crossing Rate (вес 0.2)
+        if zcr is not None:
+            zcr_min, zcr_max = characteristics['zcr_range']
+            if zcr_min <= zcr <= zcr_max:
+                score += 0.2
+            else:
+                deviation = min(abs(zcr - zcr_min), abs(zcr - zcr_max))
+                penalty = max(0, 0.2 - deviation / 0.1)
+                score += penalty
+            total_weight += 0.2
+        
+        # RMS энергия (вес 0.15)
+        if rms is not None:
+            rms_min, rms_max = characteristics['rms_range']
+            if rms_min <= rms <= rms_max:
+                score += 0.15
+            else:
+                deviation = min(abs(rms - rms_min), abs(rms - rms_max))
+                penalty = max(0, 0.15 - deviation / 0.2)
+                score += penalty
+            total_weight += 0.15
+        
+        # Спектральная полоса пропускания (вес 0.1)
+        if bandwidth is not None:
+            bw_min, bw_max = characteristics['bandwidth_range']
+            if bw_min <= bandwidth <= bw_max:
+                score += 0.1
+            else:
+                deviation = min(abs(bandwidth - bw_min), abs(bandwidth - bw_max))
+                penalty = max(0, 0.1 - deviation / 1500.0)
+                score += penalty
+            total_weight += 0.1
+        
+        # Добавляем расширенные критерии с меньшими весами
+        
+        # Баланс частот (вес 0.05)
+        if extended_features['bass_emphasis'] is not None:
+            bass_min, bass_max = characteristics['bass_emphasis']
+            if bass_min <= extended_features['bass_emphasis'] <= bass_max:
+                score += 0.05
+            else:
+                deviation = min(abs(extended_features['bass_emphasis'] - bass_min), 
+                              abs(extended_features['bass_emphasis'] - bass_max))
+                penalty = max(0, 0.05 - deviation / 0.5)
+                score += penalty
+            total_weight += 0.05
+        
+        # Гармоническая сложность (вес 0.04)
+        if extended_features['harmonic_complexity'] is not None:
+            harm_min, harm_max = characteristics['harmonic_complexity']
+            if harm_min <= extended_features['harmonic_complexity'] <= harm_max:
+                score += 0.04
+            else:
+                deviation = min(abs(extended_features['harmonic_complexity'] - harm_min),
+                              abs(extended_features['harmonic_complexity'] - harm_max))
+                penalty = max(0, 0.04 - deviation / 0.5)
+                score += penalty
+            total_weight += 0.04
+        
+        # Ритмическая регулярность (вес 0.04)
+        if extended_features['rhythmic_regularity'] is not None:
+            rhythm_min, rhythm_max = characteristics['rhythmic_regularity']
+            if rhythm_min <= extended_features['rhythmic_regularity'] <= rhythm_max:
+                score += 0.04
+            else:
+                deviation = min(abs(extended_features['rhythmic_regularity'] - rhythm_min),
+                              abs(extended_features['rhythmic_regularity'] - rhythm_max))
+                penalty = max(0, 0.04 - deviation / 0.5)
+                score += penalty
+            total_weight += 0.04
+        
+        # Вокальное присутствие (вес 0.03)
+        if extended_features['vocal_likelihood'] is not None:
+            vocal_min, vocal_max = characteristics['vocal_likelihood']
+            if vocal_min <= extended_features['vocal_likelihood'] <= vocal_max:
+                score += 0.03
+            else:
+                deviation = min(abs(extended_features['vocal_likelihood'] - vocal_min),
+                              abs(extended_features['vocal_likelihood'] - vocal_max))
+                penalty = max(0, 0.03 - deviation / 0.5)
+                score += penalty
+            total_weight += 0.03
+        
+        # Перкуссивная сила (вес 0.03)
+        if extended_features['percussive_strength'] is not None:
+            perc_min, perc_max = characteristics['percussive_strength']
+            if perc_min <= extended_features['percussive_strength'] <= perc_max:
+                score += 0.03
+            else:
+                deviation = min(abs(extended_features['percussive_strength'] - perc_min),
+                              abs(extended_features['percussive_strength'] - perc_max))
+                penalty = max(0, 0.03 - deviation / 0.5)
+                score += penalty
+            total_weight += 0.03
+        
+        # Присутствие синтезаторов (вес 0.03)
+        if extended_features['synth_presence'] is not None:
+            synth_min, synth_max = characteristics['synth_presence']
+            if synth_min <= extended_features['synth_presence'] <= synth_max:
+                score += 0.03
+            else:
+                deviation = min(abs(extended_features['synth_presence'] - synth_min),
+                              abs(extended_features['synth_presence'] - synth_max))
+                penalty = max(0, 0.03 - deviation / 0.5)
+                score += penalty
+            total_weight += 0.03
+        
+        # Нормализуем счет
+        if total_weight > 0:
+            genre_scores[genre] = score / total_weight
+        else:
+            genre_scores[genre] = 0.0
+    
+    # Находим жанр с наивысшим счетом
+    if genre_scores:
+        predicted_genre = max(genre_scores, key=genre_scores.get)
+        confidence = genre_scores[predicted_genre]
+        
+        # Сортируем жанры по вероятности
+        sorted_genres = dict(sorted(genre_scores.items(), key=lambda x: x[1], reverse=True))
+        
+        # Берем топ-5 жанров для отображения
+        top_genres = dict(list(sorted_genres.items())[:5])
+        
+        return {
+            'predicted_genre': predicted_genre,
+            'confidence': round(confidence * 100, 1),  # Переводим в проценты
+            'genre_probabilities': {k: round(v * 100, 1) for k, v in top_genres.items()}
+        }
+    else:
+        return {
+            'predicted_genre': 'Unknown',
+            'confidence': 0.0,
+            'genre_probabilities': {}
+        }
+
+def analyze_frequency_balance(y, sr):
+    """
+    Анализ баланса частот: бас, средние и высокие частоты
+    """
+    try:
+        # Вычисляем спектр
+        D = librosa.stft(y)
+        magnitude = np.abs(D)
+        
+        # Определяем частотные диапазоны
+        freqs = librosa.fft_frequencies(sr=sr)
+        
+        # Басовые частоты (20-250 Hz)
+        bass_mask = (freqs >= 20) & (freqs <= 250)
+        bass_energy = np.mean(magnitude[bass_mask, :])
+        
+        # Средние частоты (250-4000 Hz)
+        mid_mask = (freqs >= 250) & (freqs <= 4000)
+        mid_energy = np.mean(magnitude[mid_mask, :])
+        
+        # Высокие частоты (4000-20000 Hz)
+        high_mask = (freqs >= 4000) & (freqs <= 20000)
+        high_energy = np.mean(magnitude[high_mask, :])
+        
+        # Нормализуем относительно общей энергии
+        total_energy = bass_energy + mid_energy + high_energy
+        
+        if total_energy > 0:
+            bass_emphasis = bass_energy / total_energy
+            mid_freq_balance = mid_energy / total_energy
+            high_freq_presence = high_energy / total_energy
+        else:
+            bass_emphasis = 0.33
+            mid_freq_balance = 0.33
+            high_freq_presence = 0.33
+        
+        return {
+            'bass_emphasis': float(bass_emphasis),
+            'mid_freq_balance': float(mid_freq_balance),
+            'high_freq_presence': float(high_freq_presence)
+        }
+        
+    except Exception as e:
+        print(f"⚠️ Ошибка анализа частотного баланса: {e}")
+        return {
+            'bass_emphasis': 0.33,
+            'mid_freq_balance': 0.33,
+            'high_freq_presence': 0.33
+        }
+
+def analyze_harmonic_complexity(y, sr):
+    """
+    Анализ гармонической сложности на основе chroma и тональной стабильности
+    """
+    try:
+        # Chroma features для анализа гармонии
+        chroma = librosa.feature.chroma_stft(y=y, sr=sr)
+        
+        # Вычисляем стандартное отклонение chroma (показатель сложности)
+        chroma_std = np.std(chroma, axis=1)
+        avg_chroma_complexity = np.mean(chroma_std)
+        
+        # Тональная стабильность (насколько стабильна тональность)
+        chroma_var = np.var(chroma, axis=1)
+        tonal_stability = 1.0 - np.mean(chroma_var)
+        
+        # Комбинируем показатели
+        harmonic_complexity = (avg_chroma_complexity + (1.0 - tonal_stability)) / 2.0
+        
+        # Нормализуем в диапазон 0-1
+        harmonic_complexity = np.clip(harmonic_complexity, 0.0, 1.0)
+        
+        return float(harmonic_complexity)
+        
+    except Exception as e:
+        print(f"⚠️ Ошибка анализа гармонической сложности: {e}")
+        return 0.5
+
+def analyze_rhythmic_regularity(y, sr):
+    """
+    Анализ ритмической регулярности на основе onset detection и beat tracking
+    """
+    try:
+        # Детекция onset'ов (начал нот/ударов)
+        onset_frames = librosa.onset.onset_detect(y=y, sr=sr)
+        onset_times = librosa.frames_to_time(onset_frames, sr=sr)
+        
+        if len(onset_times) < 3:
+            return 0.5  # Недостаточно данных
+        
+        # Вычисляем интервалы между onset'ами
+        intervals = np.diff(onset_times)
+        
+        # Регулярность = обратная величина стандартного отклонения интервалов
+        if len(intervals) > 1:
+            interval_std = np.std(intervals)
+            mean_interval = np.mean(intervals)
+            
+            if mean_interval > 0:
+                # Коэффициент вариации (CV)
+                cv = interval_std / mean_interval
+                # Преобразуем в показатель регулярности (0-1)
+                regularity = 1.0 / (1.0 + cv)
+            else:
+                regularity = 0.5
+        else:
+            regularity = 0.5
+        
+        return float(np.clip(regularity, 0.0, 1.0))
+        
+    except Exception as e:
+        print(f"⚠️ Ошибка анализа ритмической регулярности: {e}")
+        return 0.7
+
+def analyze_vocal_presence(y, sr, mfccs):
+    """
+    Анализ вероятности наличия вокала на основе MFCC и спектральных характеристик
+    """
+    try:
+        # MFCC характеристики, типичные для вокала
+        # Первые несколько MFCC коэффициентов содержат информацию о формантах
+        if mfccs is not None and len(mfccs) >= 4:
+            # Анализируем первые 4 MFCC коэффициента
+            mfcc_vocal_indicators = mfccs[1:4]  # Пропускаем первый (энергия)
+            
+            # Вокал обычно имеет характерные значения MFCC
+            vocal_score = 0.0
+            
+            # MFCC1: обычно в диапазоне -50 до 50 для вокала
+            if -50 <= mfcc_vocal_indicators[0] <= 50:
+                vocal_score += 0.3
+            
+            # MFCC2: вариативность указывает на формантные переходы
+            mfcc2_var = np.var(mfccs[2])
+            if 10 <= mfcc2_var <= 100:
+                vocal_score += 0.3
+            
+            # MFCC3: также связан с формантами
+            mfcc3_mean = np.mean(mfccs[3])
+            if -30 <= mfcc3_mean <= 30:
+                vocal_score += 0.2
+        else:
+            vocal_score = 0.3
+        
+        # Дополнительный анализ через спектральные характеристики
+        try:
+            # Спектральный центроид в диапазоне человеческого голоса
+            spectral_centroids = librosa.feature.spectral_centroid(y=y, sr=sr)[0]
+            avg_centroid = np.mean(spectral_centroids)
+            
+            # Человеческий голос обычно в диапазоне 500-4000 Hz
+            if 500 <= avg_centroid <= 4000:
+                vocal_score += 0.2
+            
+        except:
+            pass
+        
+        return float(np.clip(vocal_score, 0.0, 1.0))
+        
+    except Exception as e:
+        print(f"⚠️ Ошибка анализа вокального присутствия: {e}")
+        return 0.3
+
+def analyze_percussive_strength(y, sr):
+    """
+    Анализ силы перкуссивных элементов
+    """
+    try:
+        # Разделяем на гармонические и перкуссивные компоненты
+        y_harmonic, y_percussive = librosa.effects.hpss(y)
+        
+        # Вычисляем энергию перкуссивных компонентов
+        percussive_energy = np.mean(y_percussive ** 2)
+        total_energy = np.mean(y ** 2)
+        
+        if total_energy > 0:
+            percussive_ratio = percussive_energy / total_energy
+        else:
+            percussive_ratio = 0.5
+        
+        # Дополнительно анализируем onset strength
+        try:
+            onset_strength = librosa.onset.onset_strength(y=y, sr=sr)
+            avg_onset_strength = np.mean(onset_strength)
+            
+            # Нормализуем и комбинируем с перкуссивным соотношением
+            normalized_onset = np.clip(avg_onset_strength / 10.0, 0.0, 1.0)
+            percussive_strength = (percussive_ratio + normalized_onset) / 2.0
+        except:
+            percussive_strength = percussive_ratio
+        
+        return float(np.clip(percussive_strength, 0.0, 1.0))
+        
+    except Exception as e:
+        print(f"⚠️ Ошибка анализа перкуссивной силы: {e}")
+        return 0.6
+
+def analyze_synth_presence(y, sr, mfccs, spectral_contrast):
+    """
+    Анализ присутствия синтезаторов на основе спектральных характеристик
+    """
+    try:
+        synth_score = 0.0
+        
+        # Синтезаторы часто имеют высокий спектральный контраст
+        if spectral_contrast is not None:
+            if spectral_contrast > 15:  # Высокий контраст
+                synth_score += 0.3
+            elif spectral_contrast > 10:
+                synth_score += 0.2
+        
+        # Анализ спектрального роллоффа
+        try:
+            rolloff = librosa.feature.spectral_rolloff(y=y, sr=sr)[0]
+            avg_rolloff = np.mean(rolloff)
+            
+            # Синтезаторы могут иметь расширенный частотный спектр
+            if avg_rolloff > 8000:  # Высокие частоты
+                synth_score += 0.2
+        except:
+            pass
+        
+        # Анализ спектральной плоскости (flatness)
+        try:
+            spectral_flatness = librosa.feature.spectral_flatness(y=y)[0]
+            avg_flatness = np.mean(spectral_flatness)
+            
+            # Синтезаторы могут иметь более "плоский" спектр
+            if avg_flatness > 0.1:
+                synth_score += 0.2
+        except:
+            pass
+        
+        # MFCC анализ для синтетических звуков
+        if mfccs is not None and len(mfccs) >= 6:
+            # Синтезаторы часто имеют характерные MFCC паттерны
+            mfcc_variance = np.var(mfccs[4:6], axis=1)
+            avg_mfcc_var = np.mean(mfcc_variance)
+            
+            if avg_mfcc_var > 50:  # Высокая вариативность
+                synth_score += 0.2
+        
+        # Анализ zero crossing rate (уже есть в основных параметрах)
+        try:
+            zcr = librosa.feature.zero_crossing_rate(y)[0]
+            avg_zcr = np.mean(zcr)
+            
+            # Синтезаторы могут иметь характерные ZCR паттерны
+            if 0.05 <= avg_zcr <= 0.3:
+                synth_score += 0.1
+        except:
+            pass
+        
+        return float(np.clip(synth_score, 0.0, 1.0))
+        
+    except Exception as e:
+        print(f"⚠️ Ошибка анализа присутствия синтезаторов: {e}")
+        return 0.5
+
+def get_tempo_description(bpm):
+    """
+    Возвращает описание темпа на основе BPM
+    """
+    if bpm is None:
+        return None
+    
+    if bpm < 60:
+        return "Очень медленно (Largo)"
+    elif bpm < 76:
+        return "Медленно (Adagio)"
+    elif bpm < 108:
+        return "Умеренно (Andante)"
+    elif bpm < 120:
+        return "Умеренно быстро (Moderato)"
+    elif bpm < 168:
+        return "Быстро (Allegro)"
+    elif bpm < 200:
+        return "Очень быстро (Presto)"
+    else:
+        return "Чрезвычайно быстро (Prestissimo)"
+
+@app.route('/analyze', methods=['POST'])
+def analyze_audio():
+    """
+    Эндпоинт для анализа аудио файла
+    """
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'Файл не найден'}), 400
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'error': 'Файл не выбран'}), 400
+        
+        # Проверяем формат файла
+        allowed_extensions = {'.mp3', '.wav', '.flac', '.m4a', '.aac'}
+        _, ext = os.path.splitext(file.filename.lower())
+        if ext not in allowed_extensions:
+            return jsonify({'error': f'Неподдерживаемый формат файла: {ext}'}), 400
+        
+        # Создаем временную директорию
+        temp_dir = tempfile.mkdtemp()
+        
+        try:
+            # Сохраняем файл
+            input_path = os.path.join(temp_dir, file.filename)
+            file.save(input_path)
+            
+            print(f"🔍 Начинаем анализ файла: {file.filename}")
+            
+            # Анализируем файл
+            analysis_result = analyze_audio_file(input_path)
+            
+            return jsonify(analysis_result)
+            
+        finally:
+            # Очищаем временные файлы
+            import shutil
+            try:
+                shutil.rmtree(temp_dir)
+            except:
+                pass
+                
+    except Exception as e:
+        print(f"❌ Ошибка в эндпоинте анализа: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 if __name__ == '__main__':
-    print("🎵 Запуск сервера обработки аудио с WebSocket поддержкой...")
+    print("🎵 Запуск сервера обработки аудио...")
     print("📚 Доступные алгоритмы:")
     print("   1. Rubber Band (лучший для сохранения качества)")
     print("   2. Librosa Phase Vocoder (fallback)")
     print("   3. Простая интерполяция (последний fallback)")
     print("🌐 Сервер доступен на http://localhost:5230")
-    print("📡 WebSocket доступен на ws://localhost:5230")
     
-    # Используем SocketIO для запуска сервера
-    import os
-    if os.environ.get('FLASK_ENV') == 'production':
-        # В production используем eventlet
-        socketio.run(app, debug=False, host='0.0.0.0', port=5230)
-    else:
-        # В разработке
-        socketio.run(app, debug=True, host='0.0.0.0', port=5230)
+    # Запускаем обычный Flask сервер
+    app.run(debug=True, host='0.0.0.0', port=5230)
