@@ -1,3 +1,6 @@
+# Coolify Configuration for SETINA Slowdown App
+# This file contains deployment configuration for Coolify
+
 version: '3.8'
 
 services:
@@ -5,7 +8,6 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: slowdown-backend
     restart: unless-stopped
     environment:
       - FLASK_ENV=production
@@ -18,15 +20,15 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+    labels:
+      - "coolify.managed=true"
+      - "coolify.name=slowdown-backend"
 
   frontend:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: slowdown-frontend
     restart: unless-stopped
-    ports:
-      - "80:80"
     depends_on:
       - backend
     healthcheck:
@@ -35,7 +37,17 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+    labels:
+      - "coolify.managed=true"
+      - "coolify.name=slowdown-frontend"
+      - "traefik.enable=true"
+      - "traefik.http.routers.slowdown.rule=Host(`${FQDN}`)"
+      - "traefik.http.routers.slowdown.entrypoints=websecure"
+      - "traefik.http.routers.slowdown.tls.certresolver=letsencrypt"
+      - "traefik.http.services.slowdown.loadbalancer.server.port=80"
 
 networks:
   default:
     name: slowdown-network
+    labels:
+      - "coolify.managed=true"
