@@ -79,11 +79,16 @@ function App() {
       return;
     }
 
+    // В production отключаем WebSocket из-за проблем с Traefik
+    if (process.env.NODE_ENV === 'production') {
+      console.log('🔌 Production режим: WebSocket отключен, используем только HTTP polling');
+      setSocketConnected(false);
+      return;
+    }
+
     try {
-      // Определяем URL для WebSocket в зависимости от окружения
-      const socketUrl = process.env.NODE_ENV === 'production' 
-        ? window.location.origin  // В production используем текущий домен
-        : 'http://localhost:5230'; // В development используем localhost
+      // В development используем localhost
+      const socketUrl = 'http://localhost:5230';
       
       console.log('🔌 Инициализация WebSocket:', socketUrl);
       
