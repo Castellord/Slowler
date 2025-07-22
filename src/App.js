@@ -232,14 +232,8 @@ function App() {
 
       addToLog('📤 Отправляем запрос на обработку', 'info');
 
-      // Запускаем polling каждые 500ms
-      const progressInterval = setInterval(pollProgress, 500);
-      
-      // Переменная для отслеживания завершения
-      let processingComplete = false;
-      
-      // Модифицируем pollProgress для обработки завершения
-      const pollProgressWithCompletion = async () => {
+      // Запускаем polling каждые 2 секунды (уменьшаем нагрузку)
+      const progressInterval = setInterval(async () => {
         try {
           const progressResponse = await fetch(`/progress/${sessionId}`);
           if (progressResponse.ok) {
@@ -252,18 +246,13 @@ function App() {
               for (const entry of newEntries) {
                 console.log('Получен прогресс:', entry);
                 
-                if (entry.type === 'complete') {
-                  addToLog('🎉 Обработка полностью завершена!', 'success');
-                  processingComplete = true;
-                  clearInterval(progressInterval);
-                  return;
-                }
-                
                 // Добавляем сообщение от backend в лог
                 addBackendLogEntry(entry);
                 
                 // Обновляем прогресс на основе данных от сервера
-                updateProgress(entry.file_index, entry.total_files, entry.step, entry.message);
+                if (entry.file_index !== undefined && entry.total_files !== undefined) {
+                  updateProgress(entry.file_index, entry.total_files, entry.step || 0, entry.message);
+                }
               }
               
               lastProgressCount = progressData.progress.length;
@@ -272,11 +261,7 @@ function App() {
         } catch (error) {
           console.error('Ошибка polling прогресса:', error);
         }
-      };
-
-      // Заменяем функцию polling
-      clearInterval(progressInterval);
-      const newProgressInterval = setInterval(pollProgressWithCompletion, 500);
+      }, 3000); // Каждые 2 секунды
 
       // Отправляем запрос на сервер
       const response = await fetch('/process', {
@@ -284,16 +269,11 @@ function App() {
         body: formData,
       });
       
-      // Ждем завершения обработки через polling
-      while (!processingComplete) {
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        if (!processingComplete) {
-          await pollProgressWithCompletion();
-        }
-      }
+      // Останавливаем polling после получения ответа
+      clearInterval(progressInterval);
       
-      // Останавливаем polling
-      clearInterval(newProgressInterval);
+      // Получаем последние записи прогресса
+      await pollProgress();
 
       if (!response.ok) {
         if (response.status === 413) {
