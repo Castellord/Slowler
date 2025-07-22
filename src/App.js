@@ -48,12 +48,37 @@ function App() {
     return () => {
       if (socket) {
         socket.disconnect();
+        setSocket(null); // Очищаем состояние
       }
       window.removeEventListener('beforeunload', handleBeforeUnload);
     };
-  }, [processing, socket]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []); // Убираем зависимости чтобы выполнялось только один раз
+
+  // Отдельный useEffect для обработчика beforeunload с правильными зависимостями
+  useEffect(() => {
+    const handleBeforeUnload = (event) => {
+      if (processing) {
+        const sessionId = getCurrentSessionId();
+        if (sessionId) {
+          navigator.sendBeacon(`/cancel/${sessionId}`, new FormData());
+        }
+      }
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [processing, currentSessionId]);
 
   const initializeWebSocket = () => {
+    // Предотвращаем множественные инициализации
+    if (socket) {
+      console.log('🔌 WebSocket уже инициализирован, пропускаем');
+      return;
+    }
+
     try {
       // Определяем URL для WebSocket в зависимости от окружения
       const socketUrl = process.env.NODE_ENV === 'production' 
@@ -66,9 +91,9 @@ function App() {
         transports: ['polling', 'websocket'], // Сначала пробуем polling, потом websocket
         timeout: 10000, // Увеличиваем timeout до 10 секунд
         reconnection: true,
-        reconnectionDelay: 2000,
+        reconnectionDelay: 5000, // Увеличиваем задержку переподключения
         reconnectionAttempts: 3,
-        forceNew: true
+        forceNew: false // Не создаем новое соединение если уже есть
       });
 
       newSocket.on('connect', () => {
