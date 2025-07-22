@@ -12,6 +12,12 @@ services:
       - PYTHONUNBUFFERED=1
     volumes:
       - /tmp:/tmp
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 1G
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5230/health"]
       interval: 30s
